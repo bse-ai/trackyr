@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: trackyr-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: trackyr
+      POSTGRES_PASSWORD: trackyr
+      POSTGRES_DB: trackyr
+    ports:
+      - "5433:5432"
+    volumes:
+      - trackyr_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trackyr"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: trackyr-pgadmin
+    profiles: [admin]
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@trackyr.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5480:80"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  trackyr_pgdata:
