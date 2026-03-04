@@ -1,0 +1,17 @@
+{
+  "name": "Trackyr Break Reminder",
+  "schedule": {
+    "kind": "cron",
+    "expr": "*/30 9-18 * * 1-5",
+    "tz": "America/New_York"
+  },
+  "sessionTarget": "isolated",
+  "payload": {
+    "kind": "agentTurn",
+    "message": "Check my current context using the trackyr-activity skill (--mode context --format json). If I've been continuously active for more than 90 minutes without a break, send me a gentle reminder to take a 5-minute break. If I recently took a break or have been idle, do nothing (don't send any message)."
+  },
+  "delivery": {
+    "mode": "announce",
+    "channel": "slack"
+  }
+}

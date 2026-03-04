@@ -7,6 +7,17 @@ Usage:
     python trackyr_query.py --mode hours --hours 2
     python trackyr_query.py --mode weekly
     python trackyr_query.py --mode current
+    python trackyr_query.py --mode timeline --date 2026-03-01
+    python trackyr_query.py --mode focus
+    python trackyr_query.py --mode productivity
+    python trackyr_query.py --mode context-switches
+    python trackyr_query.py --mode trends --days 7
+    python trackyr_query.py --mode context --format json
+    python trackyr_query.py --mode standup
+    python trackyr_query.py --mode goals
+    python trackyr_query.py --mode categories
+    python trackyr_query.py --mode search --query "trackyr"
+    python trackyr_query.py --mode health
     python trackyr_query.py --mode today --format json
 """
 
@@ -17,11 +28,22 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from datetime import date as date_type
 
 BASE_URL = "http://localhost:8099/api/v1"
 
+ALL_MODES = [
+    "today", "date", "hours", "weekly", "current",
+    "timeline", "focus", "productivity", "context-switches",
+    "trends", "context", "standup", "goals", "categories",
+    "search", "health",
+    "heatmap", "heatmap-week", "workday", "narrative",
+    "switch-patterns", "anomalies", "engagement", "baselines",
+    "notes", "export",
+]
 
-def fetch(path: str) -> dict:
+
+def fetch(path: str) -> dict | list:
     """GET a JSON endpoint from the Trackyr API."""
     url = f"{BASE_URL}{path}"
     try:
@@ -33,6 +55,22 @@ def fetch(path: str) -> dict:
         print("Make sure Trackyr is running: python -m trackyr", file=sys.stderr)
         sys.exit(1)
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _fmt(seconds) -> str:
+    """Format seconds as Xh Ym."""
+    seconds = int(seconds or 0)
+    h, r = divmod(seconds, 3600)
+    m = r // 60
+    return f"{h}h {m}m" if h else f"{m}m"
+
+
+# ---------------------------------------------------------------------------
+# Render functions — existing
+# ---------------------------------------------------------------------------
 
 def _render_app_table(apps: list[dict], limit: int = 15) -> list[str]:
     """Render top-apps table rows shared by daily/hours renderers."""
@@ -115,16 +153,299 @@ def render_current(data: dict) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Render functions — new modes
+# ---------------------------------------------------------------------------
+
+def render_timeline(data: list[dict]) -> str:
+    lines = [
+        f"Activity Timeline ({len(data)} samples)",
+        f"{'Time':<22} {'App':<25} {'Window':<40} {'Idle':>5}",
+        f"{'-'*22} {'-'*25} {'-'*40} {'-'*5}",
+    ]
+    for s in data:
+        time = s.get("sampled_at", "")[:19]
+        app = (s.get("process_name") or "unknown")[:25]
+        win = (s.get("window_title") or "")[:40]
+        idle = "yes" if s.get("is_idle") else ""
+        lines.append(f"{time:<22} {app:<25} {win:<40} {idle:>5}")
+    return "\n".join(lines)
+
+
+def render_focus(data: list[dict]) -> str:
+    if not data:
+        return "No focus sessions detected (>30 min on one app)."
+    lines = [
+        f"Focus Sessions ({len(data)} detected)",
+        f"{'='*50}",
+    ]
+    for i, s in enumerate(data, 1):
+        lines.append(f"\n  Session {i}: {s.get('primary_app', 'unknown')}")
+        lines.append(f"  Duration: {s.get('duration_fmt', '?')}")
+        lines.append(f"  Time:     {s.get('started_at', '')[:16]} to {s.get('ended_at', '')[:16]}")
+        lines.append(f"  Quality:  {s.get('quality_score', 0):.0f}/100")
+        lines.append(f"  Input:    {s.get('total_clicks', 0)} clicks, {s.get('total_keys', 0)} keys")
+    return "\n".join(lines)
+
+
+def render_productivity(data: dict) -> str:
+    lines = [
+        f"Productivity Report — {data.get('date', 'today')}",
+        f"{'='*40}",
+        f"Score:          {data.get('productivity_pct', 0):.1f}%",
+        f"Active time:    {_fmt(data.get('total_active_seconds', 0))}",
+        f"Productive:     {_fmt(data.get('productive_seconds', 0))}",
+        f"Unproductive:   {_fmt(data.get('unproductive_seconds', 0))}",
+        f"Uncategorized:  {_fmt(data.get('uncategorized_seconds', 0))}",
+        "",
+        "By Category:",
+    ]
+    for cat, info in (data.get("by_category") or {}).items():
+        lines.append(f"  {cat:<20} {info.get('fmt', '?'):>8}  ({', '.join(info.get('apps', [])[:3])})")
+    return "\n".join(lines)
+
+
+def render_context_switches(data: dict) -> str:
+    lines = [
+        f"Context Switching — {data.get('date', 'today')}",
+        f"{'='*40}",
+        f"Total switches:     {data.get('total_switches', 0)}",
+        f"Avg/hour:           {data.get('avg_switches_per_hour', 0):.1f}",
+        f"Week avg:           {data.get('week_avg_switches', 0):.1f}",
+        f"vs average:         {data.get('vs_average_pct', 0):+.0f}%",
+    ]
+    return "\n".join(lines)
+
+
+def render_trends(data: dict) -> str:
+    cur = _fmt(data.get("current_total_seconds", 0))
+    prev = _fmt(data.get("previous_total_seconds", 0))
+    change = data.get("change_pct", 0)
+    lines = [
+        f"Trend Comparison",
+        f"{'='*40}",
+        f"Current period:  {data.get('current_period', {}).get('start', '?')} to {data.get('current_period', {}).get('end', '?')}",
+        f"Previous period: {data.get('previous_period', {}).get('start', '?')} to {data.get('previous_period', {}).get('end', '?')}",
+        f"",
+        f"Current total:   {cur}",
+        f"Previous total:  {prev}",
+        f"Change:          {change:+.1f}%",
+        "",
+        "Notable changes:",
+    ]
+    for c in (data.get("notable_changes") or [])[:5]:
+        lines.append(f"  {c.get('app', '?'):<25} {c.get('change_pct', 0):+.0f}%")
+    return "\n".join(lines)
+
+
+def render_ai_context(data: dict) -> str:
+    lines = [
+        f"Current Context",
+        f"App:          {data.get('current_app', 'unknown')}",
+        f"Active since: {(data.get('active_since') or '')[:16]}",
+        f"Active today: {data.get('total_active_today_fmt', '?')}",
+        f"Productivity: {data.get('productivity_pct', 0):.0f}%",
+        f"Focus today:  {data.get('focus_sessions_today', 0)} sessions",
+        f"Status:       {'idle' if data.get('is_idle') else 'active'}",
+    ]
+    return "\n".join(lines)
+
+
+def render_standup(data: dict) -> str:
+    text = data.get("standup_text", "")
+    if text:
+        return text
+    # Fallback to structured rendering
+    lines = [f"Standup — {data.get('date', 'yesterday')}", f"{'='*40}"]
+    summary = data.get("summary", {})
+    if summary:
+        lines.append(f"Active: {summary.get('total_active_fmt', '?')}, Idle: {summary.get('total_idle_fmt', '?')}")
+    lines.append(f"Productivity: {data.get('productivity_pct', 0):.0f}%")
+    for s in data.get("focus_sessions", [])[:3]:
+        lines.append(f"  Focus: {s.get('primary_app', '?')} for {s.get('duration_fmt', '?')}")
+    return "\n".join(lines)
+
+
+def render_goals(data: list[dict]) -> str:
+    if not data:
+        return "No active goals. Set goals via POST /api/v1/goals"
+    lines = ["Goals Progress", f"{'='*50}"]
+    for g in data:
+        goal = g.get("goal", {})
+        met = "OK" if g.get("met") else ".."
+        pct = g.get("progress_pct", 0)
+        bar_len = int(pct / 5)
+        bar = "#" * bar_len + "." * (20 - bar_len)
+        lines.append(f"  [{met}] {goal.get('name', '?'):<25} [{bar}] {pct:.0f}%")
+    return "\n".join(lines)
+
+
+def render_categories(data: list[dict]) -> str:
+    if not data:
+        return "No app categories set. Configure via POST /api/v1/categories"
+    lines = [
+        "App Categories",
+        f"{'Process':<30} {'Category':<15} {'Productive':>10}",
+        f"{'-'*30} {'-'*15} {'-'*10}",
+    ]
+    for c in data:
+        prod = "yes" if c.get("is_productive") else "no"
+        lines.append(f"{c.get('process_name', '?'):<30} {c.get('category', '?'):<15} {prod:>10}")
+    return "\n".join(lines)
+
+
+def render_search(data: list[dict]) -> str:
+    if not data:
+        return "No matching activity found."
+    lines = [
+        f"Search Results ({len(data)} matches)",
+        f"{'Time':<22} {'App':<25} {'Window':<50}",
+        f"{'-'*22} {'-'*25} {'-'*50}",
+    ]
+    for s in data:
+        time = (s.get("sampled_at") or "")[:19]
+        app = (s.get("process_name") or "?")[:25]
+        win = (s.get("window_title") or "")[:50]
+        lines.append(f"{time:<22} {app:<25} {win:<50}")
+    return "\n".join(lines)
+
+
+def render_health(data: dict) -> str:
+    lines = [
+        f"System Health: {data.get('status', 'unknown').upper()}",
+        f"DB connected:     {data.get('db_connected', False)}",
+        f"Collector running: {data.get('collector_running', False)}",
+        f"Last sample age:  {data.get('last_sample_age_seconds', '?')}s",
+        f"Today's samples:  {data.get('today_sample_count', 0)}",
+    ]
+    return "\n".join(lines)
+
+
+def render_heatmap(data: dict) -> str:
+    lines = [f"Activity Heatmap - {data.get('date', 'today')}", f"{'='*60}"]
+    lines.append(f"{'Hour':<6} {'Active':>8} {'App':<25} {'Clicks':>7} {'Keys':>7}")
+    lines.append(f"{'-'*6} {'-'*8} {'-'*25} {'-'*7} {'-'*7}")
+    for h in data.get("hours", []):
+        active = _fmt(h.get("active_seconds", 0))
+        app = (h.get("dominant_app") or "-")[:25]
+        lines.append(f"{h.get('hour', 0):>4}:00 {active:>8} {app:<25} {h.get('clicks', 0):>7} {h.get('keys', 0):>7}")
+    peak = data.get("peak_hour")
+    if peak is not None:
+        lines.append(f"\nPeak hour: {peak}:00")
+    return "\n".join(lines)
+
+
+def render_workday(data: dict) -> str:
+    lines = [
+        f"Workday - {data.get('date', 'today')}",
+        f"{'='*40}",
+        f"Started:      {(data.get('work_start') or '?')[:16]}",
+        f"Ended:        {(data.get('work_end') or '?')[:16]}",
+        f"Total span:   {data.get('total_span_fmt', '?')}",
+        f"Active time:  {data.get('total_active_fmt', '?')}",
+        f"Break time:   {data.get('total_break_fmt', '?')}",
+        f"Overtime:     {'YES' if data.get('overtime') else 'No'}",
+    ]
+    lunch = data.get("lunch_break")
+    if lunch:
+        lines.append(f"Lunch:        {(lunch.get('start') or '')[:16]} ({_fmt(lunch.get('duration_seconds', 0))})")
+    breaks = data.get("breaks", [])
+    if breaks:
+        lines.append(f"\nBreaks ({len(breaks)}):")
+        for b in breaks[:10]:
+            lines.append(f"  {(b.get('start') or '')[:16]} - {_fmt(b.get('duration_seconds', 0))}")
+    return "\n".join(lines)
+
+
+def render_narrative(data: dict) -> str:
+    return data.get("narrative_text", "No narrative available.")
+
+
+def render_switch_patterns(data: dict) -> str:
+    lines = [
+        f"Context Switch Patterns - {data.get('date', 'today')}",
+        f"{'='*50}",
+        f"Total transitions: {data.get('total_transitions', 0)}",
+        "",
+        "Top Transitions:",
+    ]
+    for t in (data.get("top_transitions") or [])[:10]:
+        lines.append(f"  {t.get('from_app', '?'):<20} -> {t.get('to_app', '?'):<20} ({t.get('count', 0)}x)")
+    magnets = data.get("distraction_magnets") or []
+    if magnets:
+        lines.append("\nDistraction Magnets:")
+        for m in magnets[:5]:
+            lines.append(f"  {m.get('app', '?'):<25} {m.get('interruption_count', 0)} interruptions, avg {_fmt(m.get('avg_time_spent_seconds', 0))}")
+    return "\n".join(lines)
+
+
+def render_anomalies(data: dict) -> str:
+    anomalies = data.get("anomalies", [])
+    if not anomalies:
+        return "No anomalies detected today."
+    severity_icons = {"info": "[i]", "warning": "[!]", "alert": "[!!]"}
+    lines = [f"Anomalies - {data.get('date', 'today')}", f"{'='*50}"]
+    for a in anomalies:
+        icon = severity_icons.get(a.get("severity", "info"), "[?]")
+        lines.append(f"  {icon} {a.get('message', '?')}")
+    return "\n".join(lines)
+
+
+def render_engagement(data: dict) -> str:
+    lines = [
+        f"Engagement Curve - {data.get('date', 'today')}",
+        f"{'='*50}",
+        f"Avg engagement: {data.get('avg_engagement', 0):.0f}/100",
+        f"Peak hour:      {data.get('peak_engagement_hour', '?')}:00",
+        f"Trend:          {data.get('engagement_trend', '?')}",
+        "",
+        f"{'Hour':<6} {'Score':>6} {'Bar':<22}",
+    ]
+    for h in data.get("hours", []):
+        score = h.get("engagement_score", 0)
+        bar = "#" * int(score / 5) + "." * (20 - int(score / 5))
+        lines.append(f"{h.get('hour', 0):>4}:00 {score:>5.0f} [{bar}]")
+    return "\n".join(lines)
+
+
+def render_baselines(data: dict) -> str:
+    metrics = data.get("metrics", {})
+    if not metrics:
+        return "No baselines computed yet."
+    lines = ["Baselines (30-day rolling)", f"{'='*50}"]
+    for name, vals in metrics.items():
+        lines.append(f"  {name:<30} avg={vals.get('avg', 0):.1f}  std={vals.get('stddev', 0):.1f}")
+    return "\n".join(lines)
+
+
+def render_notes(data: list[dict]) -> str:
+    if not data:
+        return "No notes for this date."
+    lines = ["Daily Notes", f"{'='*40}"]
+    for n in data:
+        lines.append(f"  [{n.get('source', '?')}] {n.get('note_text', '')}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
     parser = argparse.ArgumentParser(description="Query Trackyr activity data")
     parser.add_argument(
         "--mode",
-        choices=["today", "date", "hours", "weekly", "current"],
+        choices=ALL_MODES,
         required=True,
         help="Query mode",
     )
-    parser.add_argument("--date", help="Date for 'date' mode (YYYY-MM-DD)")
+    parser.add_argument("--date", help="Date for date/timeline/focus/productivity/context-switches/search modes (YYYY-MM-DD)")
     parser.add_argument("--hours", type=int, default=1, help="Number of hours for 'hours' mode (default: 1)")
+    parser.add_argument("--days", type=int, default=7, help="Number of days for 'trends' mode (default: 7)")
+    parser.add_argument("--query", "-q", help="Search query for 'search' mode")
+    parser.add_argument("--app", help="Filter by app name for 'timeline' mode")
+    parser.add_argument("--start", help="Start date for 'export' mode (YYYY-MM-DD)")
+    parser.add_argument("--end", help="End date for 'export' mode (YYYY-MM-DD)")
     parser.add_argument(
         "--format",
         choices=["text", "json"],
@@ -132,6 +453,9 @@ def main():
         help="Output format (default: text)",
     )
     args = parser.parse_args()
+
+    today = date_type.today().isoformat()
+    target_date = args.date or today
 
     if args.mode == "today":
         data = fetch("/summary/today")
@@ -150,6 +474,79 @@ def main():
     elif args.mode == "current":
         data = fetch("/current")
         output = json.dumps(data, indent=2) if args.format == "json" else render_current(data)
+    elif args.mode == "timeline":
+        path = f"/timeline/{target_date}"
+        if args.app:
+            path += f"?app={urllib.request.quote(args.app)}"
+        data = fetch(path)
+        output = json.dumps(data, indent=2) if args.format == "json" else render_timeline(data)
+    elif args.mode == "focus":
+        data = fetch(f"/focus-sessions/{target_date}")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_focus(data)
+    elif args.mode == "productivity":
+        data = fetch(f"/productivity/{target_date}")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_productivity(data)
+    elif args.mode == "context-switches":
+        data = fetch(f"/context-switches/{target_date}")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_context_switches(data)
+    elif args.mode == "trends":
+        data = fetch(f"/trends?days={args.days}")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_trends(data)
+    elif args.mode == "context":
+        data = fetch("/context")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_ai_context(data)
+    elif args.mode == "standup":
+        data = fetch("/standup")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_standup(data)
+    elif args.mode == "goals":
+        data = fetch("/goals/progress")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_goals(data)
+    elif args.mode == "categories":
+        data = fetch("/categories")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_categories(data)
+    elif args.mode == "search":
+        if not args.query:
+            parser.error("--query is required for 'search' mode")
+        path = f"/search?q={urllib.request.quote(args.query)}"
+        if args.date:
+            path += f"&target_date={args.date}"
+        data = fetch(path)
+        output = json.dumps(data, indent=2) if args.format == "json" else render_search(data)
+    elif args.mode == "health":
+        data = fetch("/health")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_health(data)
+    elif args.mode == "heatmap":
+        data = fetch(f"/heatmap/{target_date}")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_heatmap(data)
+    elif args.mode == "heatmap-week":
+        data = fetch("/heatmap/week")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_heatmap(data)
+    elif args.mode == "workday":
+        data = fetch(f"/workday/{target_date}")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_workday(data)
+    elif args.mode == "narrative":
+        data = fetch(f"/narrative/{target_date}")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_narrative(data)
+    elif args.mode == "switch-patterns":
+        data = fetch(f"/context-switches/{target_date}/patterns")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_switch_patterns(data)
+    elif args.mode == "anomalies":
+        data = fetch(f"/anomalies/{target_date}")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_anomalies(data)
+    elif args.mode == "engagement":
+        data = fetch(f"/engagement/{target_date}")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_engagement(data)
+    elif args.mode == "baselines":
+        data = fetch("/baselines")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_baselines(data)
+    elif args.mode == "notes":
+        data = fetch(f"/notes/{target_date}")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_notes(data)
+    elif args.mode == "export":
+        start = args.start or target_date
+        end = args.end or target_date
+        data = fetch(f"/export/samples?start={start}&end={end}&format=json")
+        output = json.dumps(data, indent=2)
 
     # Handle unicode chars that may appear in window titles
     sys.stdout.reconfigure(errors="replace")

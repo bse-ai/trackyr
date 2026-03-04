@@ -36,5 +36,12 @@ class Config:
     weekly_report_day: str = os.getenv("WEEKLY_REPORT_DAY", "sun")
     weekly_report_hour: int = int(os.getenv("WEEKLY_REPORT_HOUR", "21"))
 
+    # Webhooks (OpenClaw integration)
+    webhook_url: str = os.getenv("WEBHOOK_URL", "http://127.0.0.1:18789/tools/invoke")
+    webhook_enabled: bool = os.getenv("WEBHOOK_ENABLED", "false").lower() in ("true", "1", "yes")
+
+    # Device
+    device_id: str = os.getenv("DEVICE_ID", "default")
+
 
 cfg = Config()

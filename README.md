@@ -6,9 +6,10 @@ Personal Windows desktop activity tracker. Logs mouse clicks, keyboard activity,
 
 - **5-second sampling** of foreground window, idle state, mouse clicks, and keystroke counts
 - **System tray** icon with color-coded status (green=active, yellow=idle, red=DB error)
-- **REST API** for querying activity data (today, by date, last N hours, weekly, current app)
+- **REST API** with 34 endpoints — summaries, timeline, focus sessions, productivity scoring, heatmaps, anomaly detection, engagement curves, data export
+- **Intelligence engine** — focus sessions, context switching, productivity scoring, trend comparison, hourly heatmaps, workday detection, daily narratives, anomaly detection, engagement curves, rolling baselines
 - **Email reports** — daily and weekly HTML summaries via Gmail
-- **[OpenClaw](https://github.com/bse-ai/openclaw) integration** — AI assistant skill for natural language activity queries
+- **[OpenClaw](https://github.com/bse-ai/openclaw) integration** — AI assistant skill + webhook events + cron automation templates
 - **Privacy-first** — keystroke counts only, never which keys. No screenshots, no network traffic.
 - **Resilient** — buffers ~83 minutes of data if the database goes down, auto-recovers
 
@@ -41,7 +42,9 @@ A system tray icon appears. Trackyr is now recording your desktop activity.
 
 ## API
 
-The API server runs on `http://localhost:8099` inside the `trackyr-server` container.
+The API server runs on `http://localhost:8099` inside the `trackyr-server` container. Interactive docs at `/docs`.
+
+### Core Endpoints
 
 | Endpoint | Description |
 |----------|-------------|
@@ -51,8 +54,50 @@ The API server runs on `http://localhost:8099` inside the `trackyr-server` conta
 | `GET /api/v1/weekly` | Last 7 days with day-by-day + top apps |
 | `GET /api/v1/current` | Currently active app and window |
 
+### Intelligence Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/focus-sessions/{date}` | Detected deep work sessions (>30 min) with quality scores |
+| `GET /api/v1/context-switches/{date}` | App switching frequency vs weekly average |
+| `GET /api/v1/context-switches/{date}/patterns` | Detailed switching patterns (bursts, triggers, calm periods) |
+| `GET /api/v1/productivity/{date}` | Productivity score based on app categories |
+| `GET /api/v1/trends?days=7` | Compare activity to previous period |
+| `GET /api/v1/timeline/{date}?app=&category=` | Granular activity timeline with filtering |
+| `GET /api/v1/heatmap/{date}` | Hourly activity heatmap (clicks, keys, active minutes) |
+| `GET /api/v1/heatmap/week` | 7-day heatmap grid |
+| `GET /api/v1/workday/{date}` | Detected work start/end, core hours, overtime |
+| `GET /api/v1/narrative/{date}` | AI-ready natural language daily narrative |
+| `GET /api/v1/anomalies/{date}` | Anomalies vs 30-day baseline (7 anomaly types) |
+| `GET /api/v1/engagement/{date}` | Per-hour engagement score (0-100) |
+| `GET /api/v1/baselines` | Current 30-day rolling baselines |
+| `GET /api/v1/context` | Compact AI-ready context snapshot |
+| `GET /api/v1/standup` | Yesterday's standup-ready summary |
+| `GET /api/v1/search?q=term` | Search by window title or process name |
+| `GET /api/v1/health` | System health check |
+
+### Configuration & Data Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET/POST /api/v1/categories` | Manage app categories (development, browsing, etc.) |
+| `GET/POST /api/v1/goals` | Set daily goals (min/max time, productivity %) |
+| `GET /api/v1/goals/progress` | Real-time goal progress tracking |
+| `GET/POST /api/v1/notes/{date}` | Daily notes / annotations |
+| `POST /api/v1/focus/start` | Manually start a focus session |
+| `POST /api/v1/focus/stop` | Manually stop a focus session |
+| `GET /api/v1/focus/active` | Check if a focus session is active |
+| `GET /api/v1/export/samples?start=&end=&format=` | Export raw samples (CSV or JSON) |
+| `GET /api/v1/export/sessions?start=&end=&format=` | Export app sessions (CSV or JSON) |
+
 ```bash
+# Quick examples
 curl http://localhost:8099/api/v1/summary/today
+curl http://localhost:8099/api/v1/productivity/2026-03-03
+curl http://localhost:8099/api/v1/focus-sessions/2026-03-03
+curl -X POST http://localhost:8099/api/v1/categories \
+  -H 'Content-Type: application/json' \
+  -d '{"process_name":"Code.exe","category":"development","is_productive":true}'
 ```
 
 ## Email Reports
@@ -69,13 +114,11 @@ EMAIL_TO=your-email@gmail.com
 
 Get an app password at https://myaccount.google.com/apppasswords (requires 2-Step Verification).
 
-Times are configurable via `DAILY_REPORT_HOUR`, `WEEKLY_REPORT_DAY`, `WEEKLY_REPORT_HOUR`.
-
 ## OpenClaw Integration
 
-Trackyr includes an [OpenClaw](https://github.com/bse-ai/openclaw) skill that lets your AI assistant query activity data using natural language.
+Trackyr integrates with [OpenClaw](https://github.com/bse-ai/openclaw) (AI assistant platform) in three ways:
 
-### Setup
+### 1. Skill — Natural Language Queries
 
 Copy the skill into your OpenClaw skills directory:
 
@@ -86,17 +129,54 @@ cp -r skills/trackyr-activity/ /path/to/openclaw/skills/
 OpenClaw auto-discovers the skill on next agent load. Then ask:
 
 - *"What did I work on today?"*
-- *"How long was I in VS Code this week?"*
-- *"What am I doing right now?"*
-- *"Show my last 2 hours of activity"*
+- *"How productive was I this week?"*
+- *"Any deep focus sessions today?"*
+- *"Am I context switching too much?"*
+- *"Generate my standup"*
 
-### Automation
+The skill supports 26 query modes — see `skills/trackyr-activity/SKILL.md` for the full list.
 
-Trackyr's API can drive OpenClaw automations:
+### 2. Cron Automation — Proactive Insights
 
-- **Cron jobs** can query the API to generate productivity insights on a schedule
-- **Pattern detection** — trigger notifications when idle too long, or surface focus time stats
-- **Workflow suggestions** — feed app usage data into OpenClaw to suggest task automation based on repetitive patterns
+Pre-built cron templates in `skills/trackyr-activity/cron-templates/`:
+
+| Template | Schedule | What it does |
+|----------|----------|-------------|
+| `hourly-productivity.json` | Every hour (9-6 weekdays) | Nudge if distracted, acknowledge focus |
+| `morning-standup.json` | 9 AM weekdays | Auto-generate yesterday's standup |
+| `break-reminder.json` | Every 30 min (9-6) | Alert after 90 min continuous activity |
+| `daily-reflection.json` | 6 PM weekdays | End-of-day summary with suggestions |
+
+Install with:
+
+```bash
+forge-orchestrator cron add --from-file skills/trackyr-activity/cron-templates/hourly-productivity.json
+```
+
+### 3. Webhooks — Push Events to OpenClaw
+
+Enable webhook events to push real-time activity signals to OpenClaw:
+
+```env
+WEBHOOK_ENABLED=true
+WEBHOOK_URL=http://127.0.0.1:18789/tools/invoke
+```
+
+Events: `focus_session_ended`, `long_idle_started`, `daily_summary_ready`, `goal_progress_update`, `overwork_alert`, `break_needed`, `anomaly_detected`
+
+### Data Flow
+
+```
+User asks OpenClaw ──→ Agent runs trackyr-activity skill
+                       ──→ Script queries Trackyr API (localhost:8099)
+                       ──→ Structured data returned to conversation
+
+Trackyr cron jobs   ──→ OpenClaw generates insights on schedule
+                       ──→ Delivered via Slack/Discord/WhatsApp
+
+Trackyr webhooks    ──→ Real-time events pushed to OpenClaw gateway
+                       ──→ Agent acts on activity changes proactively
+```
 
 ## Configuration
 
@@ -118,6 +198,9 @@ All settings via `.env` file (see `.env.example`):
 | `DAILY_REPORT_HOUR` | `21` | Hour to send daily report (24h) |
 | `WEEKLY_REPORT_DAY` | `sun` | Day to send weekly report |
 | `WEEKLY_REPORT_HOUR` | `21` | Hour to send weekly report (24h) |
+| `WEBHOOK_URL` | `http://127.0.0.1:18789/tools/invoke` | OpenClaw gateway URL |
+| `WEBHOOK_ENABLED` | `false` | Enable webhook events |
+| `DEVICE_ID` | `default` | Device identifier (multi-device) |
 
 ## Architecture
 
@@ -128,15 +211,32 @@ All settings via `.env` file (see `.env.example`):
 │  python -m trackyr          │     │  trackyr-db (PostgreSQL:5434)   │
 │  ├─ Main: system tray       │────▶│                                 │
 │  └─ Daemon: collector loop  │     │  trackyr-server (:8099)         │
-│     (5s samples)            │     │  ├─ FastAPI API                 │
+│     (5s samples)            │     │  ├─ FastAPI API (34 endpoints)  │
+│                             │     │  ├─ Intelligence engine         │
 │                             │     │  └─ APScheduler (email jobs)    │
-└─────────────────────────────┘     └─────────────────────────────────┘
+└─────────────────────────────┘     └──────────────┬──────────────────┘
                                                    │
-                                    ┌──────────────┘
-                                    ▼
-                              OpenClaw Agent
-                              "What did I work on today?"
+                                    ┌──────────────┼──────────────┐
+                                    ▼              ▼              ▼
+                              OpenClaw Agent   Cron Jobs     Webhooks
+                              (skill queries)  (proactive)   (push events)
 ```
+
+## Database
+
+PostgreSQL 16 with 9 tables:
+
+| Table | Purpose |
+|-------|---------|
+| `activity_samples` | One row per 5-sec sample (source of truth) |
+| `app_sessions` | Contiguous time on one app |
+| `daily_summaries` | One row per app per day |
+| `tracker_events` | System events (start/stop/error) |
+| `app_categories` | User-defined app categorization |
+| `goals` | Daily productivity goals |
+| `focus_sessions` | Detected deep work periods |
+| `daily_notes` | User/AI annotations per day |
+| `baselines` | 30-day rolling metric averages for anomaly detection |
 
 ## License
 

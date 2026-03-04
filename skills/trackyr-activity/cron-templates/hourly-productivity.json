@@ -1,0 +1,17 @@
+{
+  "name": "Trackyr Hourly Productivity Check",
+  "schedule": {
+    "kind": "cron",
+    "expr": "0 9-18 * * 1-5",
+    "tz": "America/New_York"
+  },
+  "sessionTarget": "isolated",
+  "payload": {
+    "kind": "agentTurn",
+    "message": "Check my current productivity using the trackyr-activity skill (--mode productivity). If my productivity score is below 60%, send me a brief encouraging nudge. If above 80%, acknowledge the good focus. Keep it to 1-2 sentences."
+  },
+  "delivery": {
+    "mode": "announce",
+    "channel": "slack"
+  }
+}

@@ -8,8 +8,11 @@ from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from trackyr.config import cfg
+from trackyr.db.engine import get_session
+from trackyr.db.models import Baseline
 from trackyr.db.writer import log_tracker_event
 from trackyr.email_send import send_email
+from trackyr.intelligence import compute_baselines
 from trackyr.reports import generate_daily_report, generate_weekly_report, render_html
 
 log = logging.getLogger(__name__)
@@ -47,6 +50,33 @@ def _send_weekly_report() -> None:
     )
 
 
+def _compute_baselines() -> None:
+    """Compute and store rolling baselines."""
+    try:
+        result = compute_baselines(days=30)
+        session = get_session()
+        try:
+            # Clear old baselines
+            session.query(Baseline).delete()
+            # Store new ones
+            for metric_name, values in result.get("metrics", {}).items():
+                session.add(Baseline(
+                    metric_name=metric_name,
+                    period_days=result.get("period_days", 30),
+                    avg_value=values.get("avg", 0.0),
+                    stddev_value=values.get("stddev", 0.0),
+                    min_value=values.get("min", 0.0),
+                    max_value=values.get("max", 0.0),
+                    details={"app_averages": result.get("app_averages", {})},
+                ))
+            session.commit()
+            log.info("Baselines computed and stored")
+        finally:
+            session.close()
+    except Exception:
+        log.exception("Failed to compute baselines")
+
+
 def start_scheduler() -> BackgroundScheduler:
     """Create and start the APScheduler with daily/weekly cron jobs."""
     scheduler = BackgroundScheduler(daemon=True)
@@ -69,6 +99,15 @@ def start_scheduler() -> BackgroundScheduler:
         minute=0,
         id="weekly_report",
         name="Weekly activity report email",
+    )
+
+    scheduler.add_job(
+        _compute_baselines,
+        "cron",
+        hour=3,
+        minute=0,
+        id="baseline_computation",
+        name="Nightly baseline computation",
     )
 
     scheduler.start()

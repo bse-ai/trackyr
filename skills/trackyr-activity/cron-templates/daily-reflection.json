@@ -1,0 +1,17 @@
+{
+  "name": "Trackyr Daily Reflection",
+  "schedule": {
+    "kind": "cron",
+    "expr": "0 18 * * 1-5",
+    "tz": "America/New_York"
+  },
+  "sessionTarget": "isolated",
+  "payload": {
+    "kind": "agentTurn",
+    "message": "Generate an end-of-day reflection using the trackyr-activity skill. Run these queries:\n1. --mode today (daily summary)\n2. --mode focus (focus sessions)\n3. --mode productivity (productivity score)\n4. --mode context-switches (context switching analysis)\n\nSummarize my day in 3-4 bullet points: what I focused on, how productive I was, and one suggestion for tomorrow. Keep it brief and actionable."
+  },
+  "delivery": {
+    "mode": "announce",
+    "channel": "slack"
+  }
+}

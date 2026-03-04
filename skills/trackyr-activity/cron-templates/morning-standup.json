@@ -1,0 +1,17 @@
+{
+  "name": "Trackyr Morning Standup",
+  "schedule": {
+    "kind": "cron",
+    "expr": "0 9 * * 1-5",
+    "tz": "America/New_York"
+  },
+  "sessionTarget": "isolated",
+  "payload": {
+    "kind": "agentTurn",
+    "message": "Generate my daily standup using the trackyr-activity skill (--mode standup). Format it as:\n- What I worked on yesterday (top 3 apps with time)\n- Focus sessions (if any deep work periods)\n- Productivity score\nKeep it concise and professional, ready to paste into a standup channel."
+  },
+  "delivery": {
+    "mode": "announce",
+    "channel": "slack"
+  }
+}
