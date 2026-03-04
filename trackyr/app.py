@@ -1,4 +1,7 @@
-"""Main orchestrator: tray on main thread, collector on daemon thread."""
+"""Main orchestrator: tray on main thread, collector on daemon thread.
+
+API server + scheduler run in the trackyr-server Docker container.
+"""
 
 from __future__ import annotations
 

@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: trackyr
       POSTGRES_DB: trackyr
     ports:
-      - "5433:5432"
+      - "5434:5432"
     volumes:
       - trackyr_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -17,19 +17,35 @@ services:
       timeout: 3s
       retries: 5
 
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    container_name: trackyr-pgadmin
-    profiles: [admin]
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: trackyr-server
     restart: unless-stopped
-    environment:
-      PGADMIN_DEFAULT_EMAIL: admin@trackyr.local
-      PGADMIN_DEFAULT_PASSWORD: admin
     ports:
-      - "5480:80"
+      - "8099:8099"
+    environment:
+      DATABASE_URL: postgresql://trackyr:trackyr@db:5432/trackyr
+      API_PORT: "8099"
+      LOG_LEVEL: INFO
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      EMAIL_TO: ${EMAIL_TO:-}
+      DAILY_REPORT_HOUR: ${DAILY_REPORT_HOUR:-21}
+      WEEKLY_REPORT_DAY: ${WEEKLY_REPORT_DAY:-sun}
+      WEEKLY_REPORT_HOUR: ${WEEKLY_REPORT_HOUR:-21}
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8099/api/v1/summary/today')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 volumes:
   trackyr_pgdata:

@@ -21,5 +21,20 @@ class Config:
     buffer_max_size: int = int(os.getenv("BUFFER_MAX_SIZE", "1000"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
 
+    # Email (Gmail SMTP)
+    smtp_host: str = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    smtp_port: int = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user: str = os.getenv("SMTP_USER", "")
+    smtp_password: str = os.getenv("SMTP_PASSWORD", "")
+    email_to: str = os.getenv("EMAIL_TO", "")
+
+    # API server
+    api_port: int = int(os.getenv("API_PORT", "8099"))
+
+    # Scheduler
+    daily_report_hour: int = int(os.getenv("DAILY_REPORT_HOUR", "21"))
+    weekly_report_day: str = os.getenv("WEEKLY_REPORT_DAY", "sun")
+    weekly_report_hour: int = int(os.getenv("WEEKLY_REPORT_HOUR", "21"))
+
 
 cfg = Config()

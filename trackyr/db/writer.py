@@ -21,6 +21,24 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def log_tracker_event(event_type: str, details: dict | None = None) -> None:
+    """Write a tracker event directly (best-effort). Standalone function."""
+    try:
+        session = get_session()
+        try:
+            event = TrackerEvent(
+                event_type=event_type,
+                occurred_at=datetime.now(timezone.utc),
+                details=details,
+            )
+            session.add(event)
+            session.commit()
+        finally:
+            session.close()
+    except SQLAlchemyError:
+        log.warning("Failed to log event %s", event_type, exc_info=True)
+
+
 class BatchWriter:
     """Buffers activity samples and writes to PG with retry.
 
@@ -68,20 +86,7 @@ class BatchWriter:
 
     def log_event(self, event_type: str, details: dict | None = None) -> None:
         """Write a tracker event directly (best-effort)."""
-        try:
-            session = get_session()
-            try:
-                event = TrackerEvent(
-                    event_type=event_type,
-                    occurred_at=datetime.now(timezone.utc),
-                    details=details,
-                )
-                session.add(event)
-                session.commit()
-            finally:
-                session.close()
-        except SQLAlchemyError:
-            log.warning("Failed to log event %s", event_type, exc_info=True)
+        log_tracker_event(event_type, details)
 
     def _flush(
         self,
