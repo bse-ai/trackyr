@@ -23,8 +23,9 @@ Two components:
 - `trackyr/db/` — models.py (SQLAlchemy ORM), engine.py, writer.py (batched writer with deque buffer)
 - `trackyr/tray.py` — system tray with green/yellow/red/gray circle icons
 - `trackyr/app.py` — orchestrator tying collector + tray together
+- `trackyr/utils.py` — shared utilities: `fmt_duration()`, `day_bounds()`, `today()` (all UTC-based)
 - `trackyr/api.py` — FastAPI endpoints (67 routes) for activity queries, intelligence, projects, tags, Pomodoro, limits, SSE streaming
-- `trackyr/intelligence.py` — 25 functions: focus sessions, context switching, productivity, trends, idle patterns, heatmaps, workday detection, narratives, anomalies, engagement curves, baselines, project detection, comparison, streaks, report cards, title metadata, highlights, momentum, switch cost, monthly rollups, session classification, weekly digests
+- `trackyr/intelligence.py` — 24 functions: focus sessions, context switching, productivity, trends, idle patterns, heatmaps, workday detection, narratives, anomalies, engagement curves, baselines, comparison, streaks, report cards, title metadata, highlights, momentum, switch cost, monthly rollups, session classification, weekly digests
 - `trackyr/projects.py` — project detection with configurable rules + built-in heuristics
 - `trackyr/streaming.py` — Server-Sent Events for real-time activity streaming
 - `trackyr/pomodoro.py` — Pomodoro timer state machine (start/pause/resume/skip/stop/interrupt)

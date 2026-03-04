@@ -14,17 +14,9 @@ from sqlalchemy.sql.expression import cast
 from trackyr.config import cfg
 from trackyr.db.engine import get_session
 from trackyr.db.models import ActivitySample, DailySummary
+from trackyr.utils import day_bounds as _day_bounds, fmt_duration as _fmt_duration, today as _today
 
 log = logging.getLogger(__name__)
-
-
-def _fmt_duration(seconds: float) -> str:
-    """Format seconds as 'Xh Ym'."""
-    h, remainder = divmod(int(seconds), 3600)
-    m = remainder // 60
-    if h > 0:
-        return f"{h}h {m}m"
-    return f"{m}m"
 
 
 def _render_app_rows_html(apps: list[dict], limit: int = 20) -> str:
@@ -45,7 +37,7 @@ def _render_app_rows_html(apps: list[dict], limit: int = 20) -> str:
 def generate_daily_report(target_date: date | None = None) -> dict[str, Any]:
     """Build a structured report dict for one day."""
     if target_date is None:
-        target_date = datetime.now(timezone.utc).date()
+        target_date = _today()
 
     session = get_session()
     try:
@@ -76,10 +68,7 @@ def generate_daily_report(target_date: date | None = None) -> dict[str, Any]:
         session_count = sum(s.session_count for s in summaries)
 
         # Idle + total sample counts in a single query
-        day_start = datetime(
-            target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc
-        )
-        day_end = day_start + timedelta(days=1)
+        day_start, day_end = _day_bounds(target_date)
 
         sample_counts = (
             session.query(
@@ -176,7 +165,7 @@ def generate_hours_report(hours: int = 1) -> dict[str, Any]:
 def generate_weekly_report(week_ending: date | None = None) -> dict[str, Any]:
     """Build a structured weekly report aggregating 7 days."""
     if week_ending is None:
-        week_ending = datetime.now(timezone.utc).date()
+        week_ending = _today()
 
     week_start = week_ending - timedelta(days=6)
 

@@ -71,6 +71,7 @@ from trackyr.pomodoro import (
 from trackyr.projects import detect_projects
 from trackyr.streaming import activity_stream, format_sse_summary
 from trackyr.reports import generate_daily_report, generate_hours_report, generate_weekly_report
+from trackyr.utils import day_bounds as _day_bounds, fmt_duration as _fmt_duration, today as _today
 
 log = logging.getLogger(__name__)
 
@@ -166,15 +167,6 @@ def current_activity():
 # ---------------------------------------------------------------------------
 
 
-def _fmt_duration(seconds: float) -> str:
-    """Format seconds as 'Xh Ym'."""
-    h, remainder = divmod(int(seconds), 3600)
-    m = remainder // 60
-    if h > 0:
-        return f"{h}h {m}m"
-    return f"{m}m"
-
-
 @app.get("/api/v1/timeline/{target_date}")
 def timeline(
     target_date: date,
@@ -256,9 +248,8 @@ def health():
             last_sample_age = None
 
         # Today's sample count
-        today = datetime.now(timezone.utc).date()
-        day_start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
-        day_end = day_start + timedelta(days=1)
+        today = _today()
+        day_start, day_end = _day_bounds(today)
         today_count = (
             session.query(func.count(ActivitySample.id))
             .filter(
@@ -333,7 +324,7 @@ def ai_context():
 @app.get("/api/v1/standup")
 def standup():
     """Generate a standup summary from yesterday's activity."""
-    yesterday = datetime.now(timezone.utc).date() - timedelta(days=1)
+    yesterday = _today() - timedelta(days=1)
 
     daily = generate_daily_report(yesterday)
     sessions = detect_focus_sessions(yesterday)
@@ -479,7 +470,7 @@ def goal_progress():
     session = get_session()
     try:
         goals = session.query(Goal).filter(Goal.active == True).all()  # noqa: E712
-        today = datetime.now(timezone.utc).date()
+        today = _today()
 
         results = []
         for g in goals:
@@ -578,10 +569,10 @@ def search(q: str, target_date: date | None = None, limit: int = 50):
 @app.get("/api/v1/heatmap/week")
 def heatmap_week():
     """Hourly heatmap for the last 7 days."""
-    today = datetime.now(timezone.utc).date()
+    td = _today()
     days = []
     for i in range(6, -1, -1):
-        d = today - timedelta(days=i)
+        d = td - timedelta(days=i)
         days.append({"date": d.isoformat(), "hours": hourly_heatmap(d)})
     return {"days": days}
 
@@ -801,8 +792,8 @@ def focus_active():
 @app.get("/api/v1/export/samples")
 def export_samples(start: date, end: date, format: str = "json"):
     """Export activity samples as JSON or CSV."""
-    start_dt = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
-    end_dt = datetime(end.year, end.month, end.day, tzinfo=timezone.utc) + timedelta(days=1)
+    start_dt = _day_bounds(start)[0]
+    end_dt = _day_bounds(end)[1]
 
     session = get_session()
     try:
@@ -851,8 +842,8 @@ def export_samples(start: date, end: date, format: str = "json"):
 @app.get("/api/v1/export/sessions")
 def export_sessions(start: date, end: date, format: str = "json"):
     """Export app sessions as JSON or CSV."""
-    start_dt = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
-    end_dt = datetime(end.year, end.month, end.day, tzinfo=timezone.utc) + timedelta(days=1)
+    start_dt = _day_bounds(start)[0]
+    end_dt = _day_bounds(end)[1]
 
     session = get_session()
     try:
@@ -969,8 +960,7 @@ def list_tags(target_date: str):
         d = date.fromisoformat(target_date)
     except ValueError:
         raise HTTPException(400, "Invalid date format")
-    day_start = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
-    day_end = day_start + timedelta(days=1)
+    day_start, day_end = _day_bounds(d)
     session = get_session()
     try:
         tags = (
@@ -1160,8 +1150,8 @@ def switch_cost(target_date: str):
 
 @app.get("/api/v1/monthly/current")
 def monthly_current():
-    today = date.today()
-    return monthly_rollup(today.year, today.month)
+    d = _today()
+    return monthly_rollup(d.year, d.month)
 
 
 @app.get("/api/v1/monthly/{year}/{month}")
@@ -1256,7 +1246,7 @@ def list_limits():
     session = get_session()
     try:
         limits = session.query(AppLimit).filter(AppLimit.active == True).all()  # noqa: E712
-        today = date.today()
+        today = _today()
         result = []
         for lim in limits:
             # Get today's usage
@@ -1318,9 +1308,7 @@ def delete_limit(limit_id: int):
 def limit_alerts_today():
     session = get_session()
     try:
-        today = date.today()
-        day_start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
-        day_end = day_start + timedelta(days=1)
+        day_start, day_end = _day_bounds(_today())
         alerts = (
             session.query(LimitAlert)
             .filter(

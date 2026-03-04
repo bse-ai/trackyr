@@ -14,6 +14,7 @@ from trackyr.db.writer import log_tracker_event
 from trackyr.email_send import send_email
 from trackyr.intelligence import compute_baselines
 from trackyr.reports import generate_daily_report, generate_weekly_report, render_html
+from trackyr.utils import today as _today
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ def _send_report(report_type: str, generate_fn, make_subject) -> None:
 
 
 def _send_daily_report() -> None:
-    today = datetime.now(timezone.utc).date()
+    today = _today()
     _send_report(
         "daily",
         lambda: generate_daily_report(today),
@@ -42,7 +43,7 @@ def _send_daily_report() -> None:
 
 
 def _send_weekly_report() -> None:
-    today = datetime.now(timezone.utc).date()
+    today = _today()
     _send_report(
         "weekly",
         lambda: generate_weekly_report(today),

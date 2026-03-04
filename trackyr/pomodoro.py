@@ -8,36 +8,16 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import func
 
 from trackyr.db.engine import get_session
+from trackyr.db.models import ActivitySample, PomodoroRecord, PomodoroTimer
+from trackyr.utils import day_bounds, today as _today
 
 log = logging.getLogger(__name__)
-
-# Try importing models (may not exist until migration 005)
-try:
-    from trackyr.db.models import PomodoroTimer, PomodoroRecord
-except ImportError:
-    PomodoroTimer = None
-    PomodoroRecord = None
-
-# Also need ActivitySample for primary_app detection
-try:
-    from trackyr.db.models import ActivitySample
-except ImportError:
-    ActivitySample = None
 
 # Statuses that mean a timer is NOT active
 _INACTIVE_STATUSES = ("idle", "completed")
 
 # Statuses that can be paused
 _PAUSABLE_STATUSES = ("work", "short_break", "long_break")
-
-
-def _check_models_available() -> None:
-    """Raise RuntimeError if Pomodoro models are not yet available."""
-    if PomodoroTimer is None or PomodoroRecord is None:
-        raise RuntimeError(
-            "PomodoroTimer/PomodoroRecord models not available. "
-            "Run migration 005 first."
-        )
 
 
 def _get_active_timer(session):
@@ -52,9 +32,6 @@ def _get_active_timer(session):
 
 def _detect_primary_app(session, started_at: datetime, ended_at: datetime) -> str | None:
     """Find the most common non-idle process during a time period."""
-    if ActivitySample is None:
-        return None
-
     try:
         result = (
             session.query(
@@ -139,6 +116,7 @@ def _advance_phase(timer, session) -> None:
 
     # Record the completed phase
     record = PomodoroRecord(
+        date=phase_started.date(),
         timer_id=timer.id,
         phase=old_status,
         started_at=phase_started,
@@ -182,7 +160,6 @@ def start_timer(
     Returns the timer state dict.
     If there's already an active timer (not idle/completed), return error.
     """
-    _check_models_available()
 
     session = get_session()
     try:
@@ -229,7 +206,6 @@ def get_status() -> dict:
 
     If no active timer, returns {"active": False, "status": "idle", ...}.
     """
-    _check_models_available()
 
     session = get_session()
     try:
@@ -261,7 +237,6 @@ def pause_timer() -> dict:
 
     Saves the remaining time and sets status to 'paused'.
     """
-    _check_models_available()
 
     session = get_session()
     try:
@@ -297,7 +272,6 @@ def pause_timer() -> dict:
 
 def resume_timer() -> dict:
     """Resume a paused timer. Recalculates phase_ends_at based on saved remaining time."""
-    _check_models_available()
 
     session = get_session()
     try:
@@ -367,7 +341,6 @@ def skip_phase() -> dict:
     short_break/long_break -> work (increments pomodoro_count)
     Records the skipped phase as completed=False in PomodoroRecord.
     """
-    _check_models_available()
 
     session = get_session()
     try:
@@ -387,6 +360,7 @@ def skip_phase() -> dict:
 
         # Record the skipped phase as incomplete
         record = PomodoroRecord(
+            date=phase_started.date(),
             timer_id=timer.id,
             phase=old_status,
             started_at=phase_started,
@@ -431,7 +405,6 @@ def stop_timer() -> dict:
     """Stop/abandon the current timer entirely. Sets status to 'completed'.
     Records any in-progress phase as completed=False.
     """
-    _check_models_available()
 
     session = get_session()
     try:
@@ -444,6 +417,7 @@ def stop_timer() -> dict:
         # Record the current in-progress phase as incomplete (if in a timed phase)
         if timer.status in _PAUSABLE_STATUSES and timer.phase_started_at:
             record = PomodoroRecord(
+                date=timer.phase_started_at.date(),
                 timer_id=timer.id,
                 phase=timer.status,
                 started_at=timer.phase_started_at,
@@ -469,7 +443,6 @@ def stop_timer() -> dict:
 
 def interrupt_timer() -> dict:
     """Record an interruption without stopping the timer. Increments interruption_count."""
-    _check_models_available()
 
     session = get_session()
     try:
@@ -495,9 +468,7 @@ def interrupt_timer() -> dict:
 
 def _build_summary(target_date: date, session) -> dict:
     """Build a Pomodoro summary for a given date."""
-    # Define the day boundaries in UTC
-    day_start = datetime(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc)
-    day_end = day_start + timedelta(days=1)
+    day_start, day_end = day_bounds(target_date)
 
     records = (
         session.query(PomodoroRecord)
@@ -567,12 +538,10 @@ def get_today_summary() -> dict:
         total_focus_minutes, total_break_minutes, total_interruptions,
         and a list of records.
     """
-    _check_models_available()
 
     session = get_session()
     try:
-        today = datetime.now(timezone.utc).date()
-        return _build_summary(today, session)
+        return _build_summary(_today(), session)
     except Exception:
         session.rollback()
         log.exception("Failed to get today's Pomodoro summary")
@@ -583,7 +552,6 @@ def get_today_summary() -> dict:
 
 def get_history(target_date: date) -> dict:
     """Get Pomodoro records for a specific date. Same format as today_summary."""
-    _check_models_available()
 
     session = get_session()
     try:

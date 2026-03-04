@@ -204,6 +204,7 @@ class PomodoroTimer(Base):
     phase_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     pomodoro_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     interruption_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    paused_remaining_seconds: Mapped[int | None] = mapped_column(Integer)
     label: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

@@ -13,44 +13,18 @@ from sqlalchemy.sql.expression import cast
 
 from trackyr.config import cfg
 from trackyr.db.engine import get_session
-from trackyr.db.models import ActivitySample, AppSession, DailySummary
+from trackyr.db.models import (
+    ActivitySample,
+    AppCategory,
+    AppSession,
+    Baseline,
+    DailySummary,
+    FocusSession,
+    Project,
+)
+from trackyr.utils import day_bounds as _day_bounds, fmt_duration as _fmt_duration, today as _today
 
 log = logging.getLogger(__name__)
-
-# Try to import models being added by another agent; gracefully degrade if
-# they don't exist yet.
-try:
-    from trackyr.db.models import AppCategory  # type: ignore[attr-defined]
-except ImportError:
-    AppCategory = None  # type: ignore[assignment,misc]
-
-try:
-    from trackyr.db.models import FocusSession  # type: ignore[attr-defined]
-except ImportError:
-    FocusSession = None  # type: ignore[assignment,misc]
-
-
-def _fmt_duration(seconds: float) -> str:
-    """Format seconds as 'Xh Ym'."""
-    h, remainder = divmod(int(seconds), 3600)
-    m = remainder // 60
-    if h > 0:
-        return f"{h}h {m}m"
-    return f"{m}m"
-
-
-def _today() -> date:
-    """Return today's date in UTC."""
-    return datetime.now(timezone.utc).date()
-
-
-def _day_bounds(target_date: date) -> tuple[datetime, datetime]:
-    """Return (start, end) datetimes for a given date in UTC."""
-    day_start = datetime(
-        target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc
-    )
-    day_end = day_start + timedelta(days=1)
-    return day_start, day_end
 
 
 # ---------------------------------------------------------------------------
@@ -354,15 +328,9 @@ def _get_app_categories(session: Any, process_names: list[str]) -> dict[str, dic
     """Look up AppCategory for a list of process names.
 
     Returns {process_name: {"category": str, "is_productive": bool}}.
-    Falls back to "uncategorized" if the AppCategory model is unavailable.
+    Falls back to "uncategorized" for process names not in the DB.
     """
     categories: dict[str, dict] = {}
-
-    if AppCategory is None:
-        # Model not yet available — everything is uncategorized
-        for pn in process_names:
-            categories[pn] = {"category": "uncategorized", "is_productive": False}
-        return categories
 
     try:
         rows = (
@@ -904,9 +872,6 @@ def current_context() -> dict:
 
 def _quick_productivity_pct(session: Any, target_date: date) -> float:
     """Lightweight productivity percentage — avoids a full productivity_score call."""
-    if AppCategory is None:
-        return 0.0
-
     try:
         summaries = (
             session.query(DailySummary)
@@ -2196,215 +2161,6 @@ def compute_baselines(days: int = 30) -> dict:
         session.close()
 
 
-# Try to import Project model; gracefully degrade if it doesn't exist yet.
-try:
-    from trackyr.db.models import Project  # type: ignore[attr-defined]
-except ImportError:
-    Project = None  # type: ignore[assignment,misc]
-
-
-# ---------------------------------------------------------------------------
-# 15. detect_projects
-# ---------------------------------------------------------------------------
-
-def detect_projects(target_date: date | None = None) -> dict:
-    """Map activity samples to projects based on pattern matching rules.
-
-    If Project rows exist, each project's ``rules`` column (a JSON array of
-    dicts with ``type`` and ``pattern`` keys) is evaluated against every
-    sample's process_name and window_title.  Supported rule types:
-
-    * ``process`` — exact (case-insensitive) process_name match
-    * ``title_contains`` — case-insensitive substring match on window_title
-    * ``title_regex`` — regex search on window_title
-
-    When no Project rows are found the function falls back to simple
-    heuristics: grouping by process_name and attempting to extract project
-    names from window titles (e.g. VS Code project names).
-    """
-    if target_date is None:
-        target_date = _today()
-
-    day_start, day_end = _day_bounds(target_date)
-
-    session = get_session()
-    try:
-        samples = (
-            session.query(ActivitySample)
-            .filter(
-                ActivitySample.sampled_at >= day_start,
-                ActivitySample.sampled_at < day_end,
-                ActivitySample.is_idle == False,  # noqa: E712
-            )
-            .order_by(ActivitySample.sampled_at)
-            .all()
-        )
-
-        if not samples:
-            return {
-                "date": target_date.isoformat(),
-                "projects": [],
-                "unmatched_seconds": 0.0,
-                "unmatched_formatted": "0m",
-            }
-
-        total_seconds = len(samples) * cfg.sample_interval
-
-        # --- Load project rules (if model available) ---
-        projects_db: list[Any] = []
-        if Project is not None:
-            try:
-                projects_db = session.query(Project).all()
-            except Exception:
-                log.warning("Project table query failed; falling back to heuristics")
-
-        if projects_db:
-            # Build compiled rule sets per project
-            project_rules: list[dict[str, Any]] = []
-            for proj in projects_db:
-                rules_raw = proj.rules if hasattr(proj, "rules") else []
-                if not isinstance(rules_raw, list):
-                    rules_raw = []
-                compiled: list[dict[str, Any]] = []
-                for rule in rules_raw:
-                    rtype = rule.get("type", "")
-                    pattern = rule.get("pattern", "")
-                    if rtype == "title_regex":
-                        try:
-                            compiled.append({"type": rtype, "regex": re.compile(pattern, re.IGNORECASE)})
-                        except re.error:
-                            log.warning("Invalid regex in project %s: %s", proj.name, pattern)
-                    else:
-                        compiled.append({"type": rtype, "pattern": pattern})
-                project_rules.append({
-                    "name": proj.name,
-                    "color": getattr(proj, "color", "#888888"),
-                    "rules": compiled,
-                })
-
-            # Match samples to projects
-            project_samples: dict[str, list] = defaultdict(list)
-            project_meta: dict[str, dict] = {}
-            unmatched: list = []
-
-            for proj_info in project_rules:
-                project_meta[proj_info["name"]] = {
-                    "color": proj_info["color"],
-                }
-
-            for sample in samples:
-                matched = False
-                pname = (sample.process_name or "").lower()
-                title = sample.window_title or ""
-
-                for proj_info in project_rules:
-                    for rule in proj_info["rules"]:
-                        if rule["type"] == "process":
-                            if pname == rule["pattern"].lower():
-                                project_samples[proj_info["name"]].append(sample)
-                                matched = True
-                                break
-                        elif rule["type"] == "title_contains":
-                            if rule["pattern"].lower() in title.lower():
-                                project_samples[proj_info["name"]].append(sample)
-                                matched = True
-                                break
-                        elif rule["type"] == "title_regex":
-                            if rule["regex"].search(title):
-                                project_samples[proj_info["name"]].append(sample)
-                                matched = True
-                                break
-                    if matched:
-                        break
-                if not matched:
-                    unmatched.append(sample)
-
-            # Build output
-            projects_out: list[dict] = []
-            for proj_name, proj_samps in project_samples.items():
-                secs = len(proj_samps) * cfg.sample_interval
-                # Collect unique window titles
-                titles = [s.window_title for s in proj_samps if s.window_title]
-                title_counts: dict[str, int] = defaultdict(int)
-                for t in titles:
-                    title_counts[t] += 1
-                top_windows = sorted(title_counts, key=title_counts.get, reverse=True)[:5]
-
-                projects_out.append({
-                    "name": proj_name,
-                    "color": project_meta[proj_name]["color"],
-                    "total_seconds": secs,
-                    "total_formatted": _fmt_duration(secs),
-                    "percentage": round(secs / total_seconds * 100, 1) if total_seconds > 0 else 0.0,
-                    "top_windows": top_windows,
-                    "sample_count": len(proj_samps),
-                })
-
-            projects_out.sort(key=lambda p: p["total_seconds"], reverse=True)
-            unmatched_secs = len(unmatched) * cfg.sample_interval
-
-            return {
-                "date": target_date.isoformat(),
-                "projects": projects_out,
-                "unmatched_seconds": unmatched_secs,
-                "unmatched_formatted": _fmt_duration(unmatched_secs),
-            }
-
-        # --- Heuristic fallback: group by process and title-derived project ---
-        heuristic_projects: dict[str, list] = defaultdict(list)
-
-        for sample in samples:
-            pname = sample.process_name or "unknown"
-            title = sample.window_title or ""
-
-            # Try to extract VS Code project name
-            m = _VSCODE_RE.match(title)
-            if m:
-                heuristic_projects[m.group("project")].append(sample)
-                continue
-
-            # Default: group by process_name
-            heuristic_projects[pname].append(sample)
-
-        projects_out_h: list[dict] = []
-        for proj_name, proj_samps in heuristic_projects.items():
-            secs = len(proj_samps) * cfg.sample_interval
-            titles = [s.window_title for s in proj_samps if s.window_title]
-            title_counts_h: dict[str, int] = defaultdict(int)
-            for t in titles:
-                title_counts_h[t] += 1
-            top_windows = sorted(title_counts_h, key=title_counts_h.get, reverse=True)[:5]
-
-            projects_out_h.append({
-                "name": proj_name,
-                "color": "#888888",
-                "total_seconds": secs,
-                "total_formatted": _fmt_duration(secs),
-                "percentage": round(secs / total_seconds * 100, 1) if total_seconds > 0 else 0.0,
-                "top_windows": top_windows,
-                "sample_count": len(proj_samps),
-            })
-
-        projects_out_h.sort(key=lambda p: p["total_seconds"], reverse=True)
-
-        return {
-            "date": target_date.isoformat(),
-            "projects": projects_out_h,
-            "unmatched_seconds": 0.0,
-            "unmatched_formatted": "0m",
-        }
-    except Exception:
-        log.exception("Error detecting projects for %s", target_date)
-        return {
-            "date": target_date.isoformat(),
-            "projects": [],
-            "unmatched_seconds": 0.0,
-            "unmatched_formatted": "0m",
-        }
-    finally:
-        session.close()
-
-
 # ---------------------------------------------------------------------------
 # 16. compare_periods
 # ---------------------------------------------------------------------------
@@ -2440,8 +2196,8 @@ def compare_periods(
             session_count = sum(s.session_count for s in summaries)
 
             # Active vs idle from ActivitySample
-            ds = datetime(p_start.year, p_start.month, p_start.day, tzinfo=timezone.utc)
-            de = datetime(p_end.year, p_end.month, p_end.day, tzinfo=timezone.utc) + timedelta(days=1)
+            ds = _day_bounds(p_start)[0]
+            de = _day_bounds(p_end)[1]
 
             active_count = (
                 session.query(func.count(ActivitySample.id))
@@ -2571,8 +2327,8 @@ def compute_streaks() -> dict:
     session = get_session()
     try:
         # ----- Pre-fetch all data for the 90-day window -----
-        ds = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
-        de = datetime(today.year, today.month, today.day, tzinfo=timezone.utc) + timedelta(days=1)
+        ds = _day_bounds(start_date)[0]
+        de = _day_bounds(today)[1]
 
         # DailySummary for productivity
         summaries = (
@@ -3142,13 +2898,6 @@ def extract_title_metadata(target_date: date | None = None) -> dict:
         session.close()
 
 
-# Try to import Baseline model; gracefully degrade if it doesn't exist yet.
-try:
-    from trackyr.db.models import Baseline  # type: ignore[attr-defined]
-except ImportError:
-    Baseline = None  # type: ignore[assignment,misc]
-
-
 # ---------------------------------------------------------------------------
 # 20. highlight_packet
 # ---------------------------------------------------------------------------
@@ -3423,8 +3172,8 @@ def momentum_score() -> dict:
             worst_day_of_week = "N/A"
 
         # Peak hour from ActivitySample (last 28 days)
-        ds = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
-        de = datetime(today.year, today.month, today.day, tzinfo=timezone.utc) + timedelta(days=1)
+        ds = _day_bounds(start_date)[0]
+        de = _day_bounds(today)[1]
 
         samples = (
             session.query(ActivitySample.sampled_at)
@@ -3674,8 +3423,8 @@ def monthly_rollup(year: int, month: int) -> dict:
         )
 
         # Total focus sessions in the month
-        ds = datetime(month_start.year, month_start.month, month_start.day, tzinfo=timezone.utc)
-        de = datetime(month_end.year, month_end.month, month_end.day, tzinfo=timezone.utc) + timedelta(days=1)
+        ds = _day_bounds(month_start)[0]
+        de = _day_bounds(month_end)[1]
         total_focus_sessions = (
             session.query(func.count(AppSession.id))
             .filter(

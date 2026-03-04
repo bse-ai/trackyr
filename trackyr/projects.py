@@ -10,16 +10,12 @@ from typing import Any
 
 from sqlalchemy import func
 
+from trackyr.config import cfg
 from trackyr.db.engine import get_session
-from trackyr.db.models import ActivitySample, DailySummary
+from trackyr.db.models import ActivitySample, DailySummary, Project
+from trackyr.utils import day_bounds, fmt_duration, today
 
 log = logging.getLogger(__name__)
-
-# Try importing Project model (may not exist until migration 004 runs)
-try:
-    from trackyr.db.models import Project
-except ImportError:
-    Project = None
 
 
 # Built-in heuristic rules when no user-defined projects exist
@@ -88,10 +84,9 @@ def detect_projects(target_date: date | None = None) -> dict:
     Returns breakdown by project with time totals and percentages.
     """
     if target_date is None:
-        target_date = datetime.now(timezone.utc).date()
+        target_date = today()
 
-    day_start = datetime(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc)
-    day_end = day_start + timedelta(days=1)
+    day_start, day_end = day_bounds(target_date)
 
     session = get_session()
     try:
@@ -112,24 +107,19 @@ def detect_projects(target_date: date | None = None) -> dict:
 
         # Load project rules
         projects_config: list[dict] = []
-        if Project is not None:
-            try:
-                db_projects = session.query(Project).filter(Project.is_active == True).all()
-                for p in db_projects:
-                    projects_config.append({
-                        "name": p.name,
-                        "color": p.color,
-                        "rules": p.rules or [],
-                    })
-            except Exception:
-                pass
+        db_projects = session.query(Project).filter(Project.is_active == True).all()
+        for p in db_projects:
+            projects_config.append({
+                "name": p.name,
+                "color": p.color,
+                "rules": p.rules or [],
+            })
 
         # Fall back to defaults if no user projects
         if not projects_config:
             projects_config = _DEFAULT_RULES
 
         # Bucket for each project
-        from trackyr.config import cfg
         interval = cfg.sample_interval
 
         project_data: dict[str, dict[str, Any]] = {}
@@ -166,14 +156,11 @@ def detect_projects(target_date: date | None = None) -> dict:
             if pd["sample_count"] == 0:
                 continue
             top_windows = sorted(pd["windows"].items(), key=lambda x: -x[1])[:5]
-            h, rem = divmod(int(pd["total_seconds"]), 3600)
-            m = rem // 60
-            fmt = f"{h}h {m}m" if h > 0 else f"{m}m"
             result_projects.append({
                 "name": pd["name"],
                 "color": pd["color"],
                 "total_seconds": pd["total_seconds"],
-                "total_formatted": fmt,
+                "total_formatted": fmt_duration(pd["total_seconds"]),
                 "percentage": round(pd["total_seconds"] / total_seconds * 100, 1) if total_seconds else 0,
                 "top_windows": [w[0] for w in top_windows],
                 "sample_count": pd["sample_count"],
@@ -181,15 +168,11 @@ def detect_projects(target_date: date | None = None) -> dict:
 
         result_projects.sort(key=lambda x: -x["total_seconds"])
 
-        h, rem = divmod(int(unmatched_seconds), 3600)
-        m = rem // 60
-        unmatched_fmt = f"{h}h {m}m" if h > 0 else f"{m}m"
-
         return {
             "date": str(target_date),
             "projects": result_projects,
             "unmatched_seconds": unmatched_seconds,
-            "unmatched_formatted": unmatched_fmt,
+            "unmatched_formatted": fmt_duration(unmatched_seconds),
             "total_seconds": total_seconds,
         }
     except Exception as exc:
