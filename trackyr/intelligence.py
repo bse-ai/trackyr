@@ -2194,3 +2194,949 @@ def compute_baselines(days: int = 30) -> dict:
         }
     finally:
         session.close()
+
+
+# Try to import Project model; gracefully degrade if it doesn't exist yet.
+try:
+    from trackyr.db.models import Project  # type: ignore[attr-defined]
+except ImportError:
+    Project = None  # type: ignore[assignment,misc]
+
+
+# ---------------------------------------------------------------------------
+# 15. detect_projects
+# ---------------------------------------------------------------------------
+
+def detect_projects(target_date: date | None = None) -> dict:
+    """Map activity samples to projects based on pattern matching rules.
+
+    If Project rows exist, each project's ``rules`` column (a JSON array of
+    dicts with ``type`` and ``pattern`` keys) is evaluated against every
+    sample's process_name and window_title.  Supported rule types:
+
+    * ``process`` — exact (case-insensitive) process_name match
+    * ``title_contains`` — case-insensitive substring match on window_title
+    * ``title_regex`` — regex search on window_title
+
+    When no Project rows are found the function falls back to simple
+    heuristics: grouping by process_name and attempting to extract project
+    names from window titles (e.g. VS Code project names).
+    """
+    if target_date is None:
+        target_date = _today()
+
+    day_start, day_end = _day_bounds(target_date)
+
+    session = get_session()
+    try:
+        samples = (
+            session.query(ActivitySample)
+            .filter(
+                ActivitySample.sampled_at >= day_start,
+                ActivitySample.sampled_at < day_end,
+                ActivitySample.is_idle == False,  # noqa: E712
+            )
+            .order_by(ActivitySample.sampled_at)
+            .all()
+        )
+
+        if not samples:
+            return {
+                "date": target_date.isoformat(),
+                "projects": [],
+                "unmatched_seconds": 0.0,
+                "unmatched_formatted": "0m",
+            }
+
+        total_seconds = len(samples) * cfg.sample_interval
+
+        # --- Load project rules (if model available) ---
+        projects_db: list[Any] = []
+        if Project is not None:
+            try:
+                projects_db = session.query(Project).all()
+            except Exception:
+                log.warning("Project table query failed; falling back to heuristics")
+
+        if projects_db:
+            # Build compiled rule sets per project
+            project_rules: list[dict[str, Any]] = []
+            for proj in projects_db:
+                rules_raw = proj.rules if hasattr(proj, "rules") else []
+                if not isinstance(rules_raw, list):
+                    rules_raw = []
+                compiled: list[dict[str, Any]] = []
+                for rule in rules_raw:
+                    rtype = rule.get("type", "")
+                    pattern = rule.get("pattern", "")
+                    if rtype == "title_regex":
+                        try:
+                            compiled.append({"type": rtype, "regex": re.compile(pattern, re.IGNORECASE)})
+                        except re.error:
+                            log.warning("Invalid regex in project %s: %s", proj.name, pattern)
+                    else:
+                        compiled.append({"type": rtype, "pattern": pattern})
+                project_rules.append({
+                    "name": proj.name,
+                    "color": getattr(proj, "color", "#888888"),
+                    "rules": compiled,
+                })
+
+            # Match samples to projects
+            project_samples: dict[str, list] = defaultdict(list)
+            project_meta: dict[str, dict] = {}
+            unmatched: list = []
+
+            for proj_info in project_rules:
+                project_meta[proj_info["name"]] = {
+                    "color": proj_info["color"],
+                }
+
+            for sample in samples:
+                matched = False
+                pname = (sample.process_name or "").lower()
+                title = sample.window_title or ""
+
+                for proj_info in project_rules:
+                    for rule in proj_info["rules"]:
+                        if rule["type"] == "process":
+                            if pname == rule["pattern"].lower():
+                                project_samples[proj_info["name"]].append(sample)
+                                matched = True
+                                break
+                        elif rule["type"] == "title_contains":
+                            if rule["pattern"].lower() in title.lower():
+                                project_samples[proj_info["name"]].append(sample)
+                                matched = True
+                                break
+                        elif rule["type"] == "title_regex":
+                            if rule["regex"].search(title):
+                                project_samples[proj_info["name"]].append(sample)
+                                matched = True
+                                break
+                    if matched:
+                        break
+                if not matched:
+                    unmatched.append(sample)
+
+            # Build output
+            projects_out: list[dict] = []
+            for proj_name, proj_samps in project_samples.items():
+                secs = len(proj_samps) * cfg.sample_interval
+                # Collect unique window titles
+                titles = [s.window_title for s in proj_samps if s.window_title]
+                title_counts: dict[str, int] = defaultdict(int)
+                for t in titles:
+                    title_counts[t] += 1
+                top_windows = sorted(title_counts, key=title_counts.get, reverse=True)[:5]
+
+                projects_out.append({
+                    "name": proj_name,
+                    "color": project_meta[proj_name]["color"],
+                    "total_seconds": secs,
+                    "total_formatted": _fmt_duration(secs),
+                    "percentage": round(secs / total_seconds * 100, 1) if total_seconds > 0 else 0.0,
+                    "top_windows": top_windows,
+                    "sample_count": len(proj_samps),
+                })
+
+            projects_out.sort(key=lambda p: p["total_seconds"], reverse=True)
+            unmatched_secs = len(unmatched) * cfg.sample_interval
+
+            return {
+                "date": target_date.isoformat(),
+                "projects": projects_out,
+                "unmatched_seconds": unmatched_secs,
+                "unmatched_formatted": _fmt_duration(unmatched_secs),
+            }
+
+        # --- Heuristic fallback: group by process and title-derived project ---
+        heuristic_projects: dict[str, list] = defaultdict(list)
+
+        for sample in samples:
+            pname = sample.process_name or "unknown"
+            title = sample.window_title or ""
+
+            # Try to extract VS Code project name
+            m = _VSCODE_RE.match(title)
+            if m:
+                heuristic_projects[m.group("project")].append(sample)
+                continue
+
+            # Default: group by process_name
+            heuristic_projects[pname].append(sample)
+
+        projects_out_h: list[dict] = []
+        for proj_name, proj_samps in heuristic_projects.items():
+            secs = len(proj_samps) * cfg.sample_interval
+            titles = [s.window_title for s in proj_samps if s.window_title]
+            title_counts_h: dict[str, int] = defaultdict(int)
+            for t in titles:
+                title_counts_h[t] += 1
+            top_windows = sorted(title_counts_h, key=title_counts_h.get, reverse=True)[:5]
+
+            projects_out_h.append({
+                "name": proj_name,
+                "color": "#888888",
+                "total_seconds": secs,
+                "total_formatted": _fmt_duration(secs),
+                "percentage": round(secs / total_seconds * 100, 1) if total_seconds > 0 else 0.0,
+                "top_windows": top_windows,
+                "sample_count": len(proj_samps),
+            })
+
+        projects_out_h.sort(key=lambda p: p["total_seconds"], reverse=True)
+
+        return {
+            "date": target_date.isoformat(),
+            "projects": projects_out_h,
+            "unmatched_seconds": 0.0,
+            "unmatched_formatted": "0m",
+        }
+    except Exception:
+        log.exception("Error detecting projects for %s", target_date)
+        return {
+            "date": target_date.isoformat(),
+            "projects": [],
+            "unmatched_seconds": 0.0,
+            "unmatched_formatted": "0m",
+        }
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# 16. compare_periods
+# ---------------------------------------------------------------------------
+
+def compare_periods(
+    start1: date, end1: date, start2: date, end2: date
+) -> dict:
+    """Compare two arbitrary date ranges side-by-side.
+
+    For each period computes total_seconds, active_seconds, idle_seconds,
+    total_clicks, total_keys, top_apps, and session_count.  Deltas are
+    returned as absolute differences and percentage change (period2 vs
+    period1).
+    """
+    session = get_session()
+    try:
+        def _period_metrics(
+            p_start: date, p_end: date
+        ) -> dict[str, Any]:
+            """Gather metrics for one period."""
+            summaries = (
+                session.query(DailySummary)
+                .filter(
+                    DailySummary.date >= p_start,
+                    DailySummary.date <= p_end,
+                )
+                .all()
+            )
+
+            total_seconds = sum(s.total_seconds for s in summaries)
+            total_clicks = sum(s.total_clicks for s in summaries)
+            total_keys = sum(s.total_keys for s in summaries)
+            session_count = sum(s.session_count for s in summaries)
+
+            # Active vs idle from ActivitySample
+            ds = datetime(p_start.year, p_start.month, p_start.day, tzinfo=timezone.utc)
+            de = datetime(p_end.year, p_end.month, p_end.day, tzinfo=timezone.utc) + timedelta(days=1)
+
+            active_count = (
+                session.query(func.count(ActivitySample.id))
+                .filter(
+                    ActivitySample.sampled_at >= ds,
+                    ActivitySample.sampled_at < de,
+                    ActivitySample.is_idle == False,  # noqa: E712
+                )
+                .scalar()
+            ) or 0
+
+            idle_count = (
+                session.query(func.count(ActivitySample.id))
+                .filter(
+                    ActivitySample.sampled_at >= ds,
+                    ActivitySample.sampled_at < de,
+                    ActivitySample.is_idle == True,  # noqa: E712
+                )
+                .scalar()
+            ) or 0
+
+            active_seconds = active_count * cfg.sample_interval
+            idle_seconds = idle_count * cfg.sample_interval
+
+            # Top apps by time
+            app_time: dict[str, float] = defaultdict(float)
+            for s in summaries:
+                app_time[s.process_name] += s.total_seconds
+            top_apps = sorted(
+                [{"app": k, "seconds": v, "formatted": _fmt_duration(v)} for k, v in app_time.items()],
+                key=lambda x: x["seconds"],
+                reverse=True,
+            )[:10]
+
+            return {
+                "total_seconds": total_seconds,
+                "active_seconds": active_seconds,
+                "idle_seconds": idle_seconds,
+                "total_clicks": total_clicks,
+                "total_keys": total_keys,
+                "top_apps": top_apps,
+                "session_count": session_count,
+            }
+
+        m1 = _period_metrics(start1, end1)
+        m2 = _period_metrics(start2, end2)
+
+        # Compute deltas
+        delta_keys = [
+            "total_seconds", "active_seconds", "idle_seconds",
+            "total_clicks", "total_keys", "session_count",
+        ]
+        deltas: dict[str, float] = {}
+        for key in delta_keys:
+            v1 = m1[key]
+            v2 = m2[key]
+            deltas[key] = v2 - v1
+            if v1 != 0:
+                deltas[f"{key}_pct"] = round((v2 - v1) / abs(v1) * 100, 1)
+            else:
+                deltas[f"{key}_pct"] = 0.0 if v2 == 0 else 100.0
+
+        return {
+            "period1": {
+                "start": start1.isoformat(),
+                "end": end1.isoformat(),
+                "metrics": m1,
+            },
+            "period2": {
+                "start": start2.isoformat(),
+                "end": end2.isoformat(),
+                "metrics": m2,
+            },
+            "deltas": deltas,
+        }
+    except Exception:
+        log.exception(
+            "Error comparing periods %s-%s vs %s-%s",
+            start1, end1, start2, end2,
+        )
+        empty_metrics: dict[str, Any] = {
+            "total_seconds": 0.0,
+            "active_seconds": 0.0,
+            "idle_seconds": 0.0,
+            "total_clicks": 0,
+            "total_keys": 0,
+            "top_apps": [],
+            "session_count": 0,
+        }
+        return {
+            "period1": {
+                "start": start1.isoformat(),
+                "end": end1.isoformat(),
+                "metrics": empty_metrics,
+            },
+            "period2": {
+                "start": start2.isoformat(),
+                "end": end2.isoformat(),
+                "metrics": empty_metrics,
+            },
+            "deltas": {},
+        }
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# 17. compute_streaks
+# ---------------------------------------------------------------------------
+
+def compute_streaks() -> dict:
+    """Compute consecutive-day streaks for various criteria.
+
+    Streak types:
+
+    * **productive** -- productivity_score > 60 for the day
+    * **active** -- at least one non-idle sample exists for the day
+    * **focus** -- at least one focus session > 45 min for the day
+    * **early_start** -- first non-idle sample is before 09:00
+
+    Looks back up to 90 days from today.
+    """
+    today = _today()
+    lookback = 90
+    start_date = today - timedelta(days=lookback - 1)
+
+    session = get_session()
+    try:
+        # ----- Pre-fetch all data for the 90-day window -----
+        ds = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
+        de = datetime(today.year, today.month, today.day, tzinfo=timezone.utc) + timedelta(days=1)
+
+        # DailySummary for productivity
+        summaries = (
+            session.query(DailySummary)
+            .filter(
+                DailySummary.date >= start_date,
+                DailySummary.date <= today,
+            )
+            .all()
+        )
+
+        # Group summaries by date for productivity calc
+        daily_sums: dict[date, list] = defaultdict(list)
+        for s in summaries:
+            daily_sums[s.date].append(s)
+
+        # ActivitySample for active days and early start
+        non_idle_rows = (
+            session.query(ActivitySample.sampled_at)
+            .filter(
+                ActivitySample.sampled_at >= ds,
+                ActivitySample.sampled_at < de,
+                ActivitySample.is_idle == False,  # noqa: E712
+            )
+            .order_by(ActivitySample.sampled_at)
+            .all()
+        )
+
+        daily_first_sample: dict[date, datetime] = {}
+        active_dates: set[date] = set()
+        for row in non_idle_rows:
+            d = row.sampled_at.date()
+            active_dates.add(d)
+            if d not in daily_first_sample or row.sampled_at < daily_first_sample[d]:
+                daily_first_sample[d] = row.sampled_at
+
+        # AppSession for focus (>=45 min sessions)
+        focus_rows = (
+            session.query(AppSession.started_at, AppSession.duration_seconds)
+            .filter(
+                AppSession.started_at >= ds,
+                AppSession.started_at < de,
+                AppSession.duration_seconds >= 2700,  # 45 minutes
+            )
+            .all()
+        )
+        focus_dates: set[date] = set()
+        for row in focus_rows:
+            focus_dates.add(row.started_at.date())
+
+        # Productivity per day
+        process_names = list({s.process_name for s in summaries})
+        categories = _get_app_categories(session, process_names) if process_names else {}
+        productive_dates: set[date] = set()
+        for d, day_sum_list in daily_sums.items():
+            day_total = sum(s.total_seconds for s in day_sum_list)
+            day_productive = sum(
+                s.total_seconds for s in day_sum_list
+                if categories.get(s.process_name, {}).get("is_productive", False)
+            )
+            if day_total > 0:
+                score = day_productive / day_total * 100
+                if score > 60:
+                    productive_dates.add(d)
+
+        # Early start dates (first sample before 09:00)
+        early_dates: set[date] = set()
+        for d, first_ts in daily_first_sample.items():
+            if first_ts.hour < 9:
+                early_dates.add(d)
+
+        # ----- Compute streaks for each type -----
+        def _compute_streak(qualifying_dates: set[date]) -> dict:
+            """Walk the date range computing current and best streaks."""
+            current = 0
+            best = 0
+            best_end: date | None = None
+            best_start: date | None = None
+
+            # Current streak: count backwards from today
+            is_active = today in qualifying_dates
+            d = today
+            while d >= start_date:
+                if d in qualifying_dates:
+                    current += 1
+                    d -= timedelta(days=1)
+                else:
+                    break
+
+            # Best streak: walk forward through the full window
+            streak = 0
+            streak_start: date | None = None
+            for i in range(lookback):
+                d = start_date + timedelta(days=i)
+                if d in qualifying_dates:
+                    if streak == 0:
+                        streak_start = d
+                    streak += 1
+                else:
+                    if streak > best:
+                        best = streak
+                        best_start = streak_start
+                        best_end = d - timedelta(days=1)
+                    streak = 0
+                    streak_start = None
+
+            # Handle streak still running at end of window
+            if streak > best:
+                best = streak
+                best_start = streak_start
+                best_end = start_date + timedelta(days=lookback - 1)
+
+            return {
+                "current": current,
+                "best": best,
+                "best_start": best_start.isoformat() if best_start else None,
+                "best_end": best_end.isoformat() if best_end else None,
+                "is_active": is_active,
+            }
+
+        return {
+            "streaks": {
+                "productive": _compute_streak(productive_dates),
+                "active": _compute_streak(active_dates),
+                "focus": _compute_streak(focus_dates),
+                "early_start": _compute_streak(early_dates),
+            },
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception:
+        log.exception("Error computing streaks")
+        empty_streak: dict[str, Any] = {
+            "current": 0,
+            "best": 0,
+            "best_start": None,
+            "best_end": None,
+            "is_active": False,
+        }
+        return {
+            "streaks": {
+                "productive": dict(empty_streak),
+                "active": dict(empty_streak),
+                "focus": dict(empty_streak),
+                "early_start": dict(empty_streak),
+            },
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+        }
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# 18. report_card
+# ---------------------------------------------------------------------------
+
+def report_card(target_date: date | None = None) -> dict:
+    """Generate a letter-grade report card for a day.
+
+    Metrics scored (each mapped to A/B/C/D/F):
+
+    * **focus** -- total focus session time
+      (A: >4h, B: >2h, C: >1h, D: >30m, F: <30m)
+    * **productivity** -- productivity_score percentage
+      (A: >80, B: >65, C: >50, D: >35, F: <35)
+    * **context_switching** -- switches per hour (lower is better)
+      (A: <5, B: <10, C: <15, D: <20, F: >=20)
+    * **engagement** -- average engagement score across active hours
+      (A: >80, B: >65, C: >50, D: >35, F: <35)
+    * **consistency** -- stddev of hourly active minutes (lower is better)
+      (A: <8, B: <12, C: <16, D: <20, F: >=20)
+
+    Overall GPA: A=4, B=3, C=2, D=1, F=0 averaged.
+    """
+    if target_date is None:
+        target_date = _today()
+
+    day_start, day_end = _day_bounds(target_date)
+
+    session = get_session()
+    try:
+        # ----- Gather raw data -----
+        # Focus sessions (>=30 min)
+        focus_sessions_list = (
+            session.query(AppSession)
+            .filter(
+                AppSession.started_at >= day_start,
+                AppSession.started_at < day_end,
+                AppSession.duration_seconds >= 1800,
+            )
+            .all()
+        )
+        total_focus_seconds = sum(s.duration_seconds for s in focus_sessions_list)
+
+        # Productivity score
+        prod = productivity_score(target_date)
+        prod_pct = prod.get("productivity_pct", 0.0)
+
+        # Context switches per hour
+        app_sessions_list = (
+            session.query(AppSession)
+            .filter(
+                AppSession.started_at >= day_start,
+                AppSession.started_at < day_end,
+            )
+            .order_by(AppSession.started_at)
+            .all()
+        )
+        total_switches = max(len(app_sessions_list) - 1, 0)
+
+        # Count active hours for switches-per-hour
+        active_hours_set: set[int] = set()
+        for s in app_sessions_list:
+            active_hours_set.add(s.started_at.hour)
+        num_active_hours = len(active_hours_set) or 1
+        switches_per_hr = total_switches / num_active_hours
+
+        # Engagement (average from engagement_curve)
+        eng = engagement_curve(target_date)
+        eng_scores = [
+            h["engagement_score"]
+            for h in eng.get("hours", [])
+            if h["engagement_score"] > 0
+        ]
+        avg_engagement = (
+            sum(eng_scores) / len(eng_scores) if eng_scores else 0.0
+        )
+
+        # Consistency: stddev of hourly active minutes
+        samples = (
+            session.query(ActivitySample)
+            .filter(
+                ActivitySample.sampled_at >= day_start,
+                ActivitySample.sampled_at < day_end,
+            )
+            .order_by(ActivitySample.sampled_at)
+            .all()
+        )
+        hourly_active_mins: dict[int, float] = defaultdict(float)
+        for s in samples:
+            if not s.is_idle:
+                hourly_active_mins[s.sampled_at.hour] += cfg.sample_interval / 60.0
+
+        active_minute_values = list(hourly_active_mins.values())
+        if len(active_minute_values) >= 2:
+            avg_min = sum(active_minute_values) / len(active_minute_values)
+            variance = sum(
+                (v - avg_min) ** 2 for v in active_minute_values
+            ) / len(active_minute_values)
+            consistency_stddev = variance ** 0.5
+        else:
+            consistency_stddev = 0.0
+
+        # ----- Grade helpers -----
+        def _grade_ascending(
+            value: float, thresholds: list[float]
+        ) -> tuple[str, str]:
+            """Grade where higher value is better.
+
+            thresholds = [F/D, D/C, C/B, B/A].
+            """
+            if value >= thresholds[3]:
+                return "A", f"{value:.1f} (>={thresholds[3]})"
+            elif value >= thresholds[2]:
+                return "B", f"{value:.1f} (>={thresholds[2]})"
+            elif value >= thresholds[1]:
+                return "C", f"{value:.1f} (>={thresholds[1]})"
+            elif value >= thresholds[0]:
+                return "D", f"{value:.1f} (>={thresholds[0]})"
+            else:
+                return "F", f"{value:.1f} (<{thresholds[0]})"
+
+        def _grade_descending(
+            value: float, thresholds: list[float]
+        ) -> tuple[str, str]:
+            """Grade where lower value is better.
+
+            thresholds = [A/B, B/C, C/D, D/F].
+            """
+            if value < thresholds[0]:
+                return "A", f"{value:.1f} (<{thresholds[0]})"
+            elif value < thresholds[1]:
+                return "B", f"{value:.1f} (<{thresholds[1]})"
+            elif value < thresholds[2]:
+                return "C", f"{value:.1f} (<{thresholds[2]})"
+            elif value < thresholds[3]:
+                return "D", f"{value:.1f} (<{thresholds[3]})"
+            else:
+                return "F", f"{value:.1f} (>={thresholds[3]})"
+
+        # Focus: total hours (A: >4h, B: >2h, C: >1h, D: >30m, F: <30m)
+        focus_hours = total_focus_seconds / 3600.0
+        focus_grade, focus_detail = _grade_ascending(
+            focus_hours, [0.5, 1.0, 2.0, 4.0]
+        )
+
+        # Productivity: percentage (A: >80, B: >65, C: >50, D: >35, F: <35)
+        prod_grade, prod_detail = _grade_ascending(
+            prod_pct, [35.0, 50.0, 65.0, 80.0]
+        )
+
+        # Context switching: per hour (A: <5, B: <10, C: <15, D: <20, F: >=20)
+        cs_grade, cs_detail = _grade_descending(
+            switches_per_hr, [5.0, 10.0, 15.0, 20.0]
+        )
+
+        # Engagement: average score (A: >80, B: >65, C: >50, D: >35, F: <35)
+        eng_grade, eng_detail = _grade_ascending(
+            avg_engagement, [35.0, 50.0, 65.0, 80.0]
+        )
+
+        # Consistency: stddev (A: <8, B: <12, C: <16, D: <20, F: >=20)
+        cons_grade, cons_detail = _grade_descending(
+            consistency_stddev, [8.0, 12.0, 16.0, 20.0]
+        )
+
+        grades: dict[str, dict[str, Any]] = {
+            "focus": {"grade": focus_grade, "score": round(focus_hours, 2), "detail": focus_detail},
+            "productivity": {"grade": prod_grade, "score": round(prod_pct, 1), "detail": prod_detail},
+            "context_switching": {"grade": cs_grade, "score": round(switches_per_hr, 1), "detail": cs_detail},
+            "engagement": {"grade": eng_grade, "score": round(avg_engagement, 1), "detail": eng_detail},
+            "consistency": {"grade": cons_grade, "score": round(consistency_stddev, 1), "detail": cons_detail},
+        }
+
+        # GPA calculation
+        grade_points = {"A": 4, "B": 3, "C": 2, "D": 1, "F": 0}
+        gpa_values = [grade_points[g["grade"]] for g in grades.values()]
+        gpa = round(sum(gpa_values) / len(gpa_values), 2) if gpa_values else 0.0
+
+        # Overall letter grade from GPA
+        if gpa >= 3.5:
+            overall_grade = "A"
+        elif gpa >= 2.5:
+            overall_grade = "B"
+        elif gpa >= 1.5:
+            overall_grade = "C"
+        elif gpa >= 0.5:
+            overall_grade = "D"
+        else:
+            overall_grade = "F"
+
+        # Determine strongest and weakest metrics
+        grade_names = {
+            "A": "excellent", "B": "good", "C": "average",
+            "D": "below average", "F": "poor",
+        }
+        strongest = max(grades, key=lambda k: grade_points[grades[k]["grade"]])
+        weakest = min(grades, key=lambda k: grade_points[grades[k]["grade"]])
+
+        summary = (
+            f"Overall grade: {overall_grade} (GPA {gpa}). "
+            f"An {grade_names[overall_grade]} day. "
+            f"Strongest: {strongest} ({grades[strongest]['grade']}). "
+            f"Needs improvement: {weakest} ({grades[weakest]['grade']})."
+        )
+
+        return {
+            "date": target_date.isoformat(),
+            "grades": grades,
+            "gpa": gpa,
+            "overall_grade": overall_grade,
+            "summary": summary,
+        }
+    except Exception:
+        log.exception("Error generating report card for %s", target_date)
+        empty_grade: dict[str, Any] = {"grade": "F", "score": 0.0, "detail": "no data"}
+        return {
+            "date": target_date.isoformat(),
+            "grades": {
+                "focus": dict(empty_grade),
+                "productivity": dict(empty_grade),
+                "context_switching": dict(empty_grade),
+                "engagement": dict(empty_grade),
+                "consistency": dict(empty_grade),
+            },
+            "gpa": 0.0,
+            "overall_grade": "F",
+            "summary": "Unable to generate report card.",
+        }
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# 19. extract_title_metadata
+# ---------------------------------------------------------------------------
+
+# Pre-compiled regex patterns for title metadata extraction
+_TICKET_ID_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
+_FILE_PATH_WIN_RE = re.compile(r"([A-Z]:\\[^\s*?\"<>|:]+\.\w+)")
+_FILE_PATH_UNIX_RE = re.compile(r"(/(?:home|usr|tmp|var|opt|etc)/[^\s*?\"<>|:]+\.\w+)")
+_URL_RE = re.compile(r"(https?://[^\s<>\"]+)")
+_VSCODE_PROJECT_RE = re.compile(
+    r"^(?:.+?)\s+[-\u2014]\s+(.+?)\s+[-\u2014]\s+Visual Studio Code$"
+)
+_TERMINAL_BRANCH_RE = re.compile(
+    r"(?:[\[\(])([a-zA-Z0-9_./-]+)(?:[\]\)])"
+)
+
+
+def extract_title_metadata(target_date: date | None = None) -> dict:
+    """Parse window titles to extract structured metadata.
+
+    Extracts:
+
+    * **ticket_ids** -- JIRA / linear / other ticket IDs (e.g. JIRA-123)
+    * **files** -- file paths (Windows and Unix)
+    * **urls** -- HTTP(S) URLs
+    * **repos** -- repository / project names from VS Code titles
+    * **branches** -- branch names from terminal titles
+    """
+    if target_date is None:
+        target_date = _today()
+
+    day_start, day_end = _day_bounds(target_date)
+
+    session = get_session()
+    try:
+        samples = (
+            session.query(ActivitySample)
+            .filter(
+                ActivitySample.sampled_at >= day_start,
+                ActivitySample.sampled_at < day_end,
+                ActivitySample.is_idle == False,  # noqa: E712
+            )
+            .order_by(ActivitySample.sampled_at)
+            .all()
+        )
+
+        if not samples:
+            return {
+                "date": target_date.isoformat(),
+                "ticket_ids": [],
+                "files": [],
+                "urls": [],
+                "repos": [],
+                "branches": [],
+            }
+
+        # Accumulators
+        ticket_data: dict[str, dict[str, Any]] = {}   # id -> {count, apps}
+        file_data: dict[str, dict[str, Any]] = {}     # path -> {count, extension}
+        url_data: dict[str, int] = defaultdict(int)    # url -> count
+        repo_data: dict[str, dict[str, Any]] = {}      # name -> {count, total_seconds}
+        branch_data: dict[str, int] = defaultdict(int)  # name -> count
+
+        for sample in samples:
+            title = sample.window_title or ""
+            pname = sample.process_name or "unknown"
+
+            if not title:
+                continue
+
+            # Ticket IDs (e.g. JIRA-123, TRACK-456)
+            for match in _TICKET_ID_RE.finditer(title):
+                ticket_id = match.group(1)
+                if ticket_id not in ticket_data:
+                    ticket_data[ticket_id] = {"count": 0, "apps": set()}
+                ticket_data[ticket_id]["count"] += 1
+                ticket_data[ticket_id]["apps"].add(pname)
+
+            # File paths (Windows)
+            for match in _FILE_PATH_WIN_RE.finditer(title):
+                fpath = match.group(1)
+                ext = fpath.rsplit(".", 1)[-1] if "." in fpath else ""
+                if fpath not in file_data:
+                    file_data[fpath] = {"count": 0, "extension": ext}
+                file_data[fpath]["count"] += 1
+
+            # File paths (Unix)
+            for match in _FILE_PATH_UNIX_RE.finditer(title):
+                fpath = match.group(1)
+                ext = fpath.rsplit(".", 1)[-1] if "." in fpath else ""
+                if fpath not in file_data:
+                    file_data[fpath] = {"count": 0, "extension": ext}
+                file_data[fpath]["count"] += 1
+
+            # URLs
+            for match in _URL_RE.finditer(title):
+                url_data[match.group(1)] += 1
+
+            # Repos from VS Code title pattern
+            vm = _VSCODE_PROJECT_RE.match(title)
+            if vm:
+                repo_name = vm.group(1).strip()
+                if repo_name not in repo_data:
+                    repo_data[repo_name] = {"count": 0, "total_seconds": 0.0}
+                repo_data[repo_name]["count"] += 1
+                repo_data[repo_name]["total_seconds"] += cfg.sample_interval
+
+            # Branch names from terminal titles
+            pname_lower = pname.lower()
+            terminal_indicators = (
+                "cmd", "powershell", "terminal", "bash",
+                "wt", "conhost", "windowsterminal",
+            )
+            if any(t in pname_lower for t in terminal_indicators):
+                bm = _TERMINAL_BRANCH_RE.search(title)
+                if bm:
+                    branch_name = bm.group(1)
+                    # Filter out very short or clearly non-branch strings
+                    if len(branch_name) > 2 and ("/" in branch_name or "-" in branch_name):
+                        branch_data[branch_name] += 1
+
+        # Format output lists, sorted by count descending
+        ticket_out = sorted(
+            [
+                {"id": tid, "count": info["count"], "apps": sorted(info["apps"])}
+                for tid, info in ticket_data.items()
+            ],
+            key=lambda x: x["count"],
+            reverse=True,
+        )
+
+        file_out = sorted(
+            [
+                {"path": fp, "count": info["count"], "extension": info["extension"]}
+                for fp, info in file_data.items()
+            ],
+            key=lambda x: x["count"],
+            reverse=True,
+        )
+
+        url_out = sorted(
+            [{"url": u, "count": c} for u, c in url_data.items()],
+            key=lambda x: x["count"],
+            reverse=True,
+        )
+
+        repo_out = sorted(
+            [
+                {
+                    "name": rn,
+                    "count": info["count"],
+                    "total_seconds": info["total_seconds"],
+                }
+                for rn, info in repo_data.items()
+            ],
+            key=lambda x: x["count"],
+            reverse=True,
+        )
+
+        branch_out = sorted(
+            [{"name": bn, "count": bc} for bn, bc in branch_data.items()],
+            key=lambda x: x["count"],
+            reverse=True,
+        )
+
+        return {
+            "date": target_date.isoformat(),
+            "ticket_ids": ticket_out,
+            "files": file_out,
+            "urls": url_out,
+            "repos": repo_out,
+            "branches": branch_out,
+        }
+    except Exception:
+        log.exception("Error extracting title metadata for %s", target_date)
+        return {
+            "date": target_date.isoformat(),
+            "ticket_ids": [],
+            "files": [],
+            "urls": [],
+            "repos": [],
+            "branches": [],
+        }
+    finally:
+        session.close()

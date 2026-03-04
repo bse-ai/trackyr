@@ -6,8 +6,8 @@ Personal Windows desktop activity tracker. Logs mouse clicks, keyboard activity,
 
 - **5-second sampling** of foreground window, idle state, mouse clicks, and keystroke counts
 - **System tray** icon with color-coded status (green=active, yellow=idle, red=DB error)
-- **REST API** with 34 endpoints — summaries, timeline, focus sessions, productivity scoring, heatmaps, anomaly detection, engagement curves, data export
-- **Intelligence engine** — focus sessions, context switching, productivity scoring, trend comparison, hourly heatmaps, workday detection, daily narratives, anomaly detection, engagement curves, rolling baselines
+- **REST API** with 46 endpoints — summaries, timeline, focus sessions, productivity scoring, heatmaps, anomaly detection, projects, streaks, report cards, tags, SSE streaming
+- **Intelligence engine** — focus sessions, context switching, productivity scoring, heatmaps, workday detection, narratives, anomaly detection, engagement curves, project detection, period comparison, streaks, report cards, title metadata extraction
 - **Email reports** — daily and weekly HTML summaries via Gmail
 - **[OpenClaw](https://github.com/bse-ai/openclaw) integration** — AI assistant skill + webhook events + cron automation templates
 - **Privacy-first** — keystroke counts only, never which keys. No screenshots, no network traffic.
@@ -90,6 +90,22 @@ The API server runs on `http://localhost:8099` inside the `trackyr-server` conta
 | `GET /api/v1/export/samples?start=&end=&format=` | Export raw samples (CSV or JSON) |
 | `GET /api/v1/export/sessions?start=&end=&format=` | Export app sessions (CSV or JSON) |
 
+### Projects, Tags, & Gamification
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET/POST /api/v1/projects` | Manage project definitions (name, color, matching rules) |
+| `GET /api/v1/projects/{date}/breakdown` | Time per project with auto-detection |
+| `GET/POST /api/v1/tags` | Create/list activity tags |
+| `GET /api/v1/tags/{date}` | Tags for a specific date |
+| `DELETE /api/v1/tags/{id}` | Delete a tag |
+| `GET /api/v1/compare?start1=&end1=&start2=&end2=` | Compare two date ranges side-by-side |
+| `GET /api/v1/streaks` | Consecutive day streaks (productive, active, focus, early start) |
+| `GET /api/v1/report-card/{date}` | Letter-grade report card (A-F) with GPA |
+| `GET /api/v1/titles/{date}` | Extract ticket IDs, repos, files from window titles |
+| `GET /api/v1/stream` | Server-Sent Events for live activity (real-time) |
+| `GET /api/v1/stream/snapshot` | Current stream state for SSE client init |
+
 ```bash
 # Quick examples
 curl http://localhost:8099/api/v1/summary/today
@@ -134,7 +150,7 @@ OpenClaw auto-discovers the skill on next agent load. Then ask:
 - *"Am I context switching too much?"*
 - *"Generate my standup"*
 
-The skill supports 26 query modes — see `skills/trackyr-activity/SKILL.md` for the full list.
+The skill supports 34 query modes — see `skills/trackyr-activity/SKILL.md` for the full list.
 
 ### 2. Cron Automation — Proactive Insights
 
@@ -211,7 +227,7 @@ All settings via `.env` file (see `.env.example`):
 │  python -m trackyr          │     │  trackyr-db (PostgreSQL:5434)   │
 │  ├─ Main: system tray       │────▶│                                 │
 │  └─ Daemon: collector loop  │     │  trackyr-server (:8099)         │
-│     (5s samples)            │     │  ├─ FastAPI API (34 endpoints)  │
+│     (5s samples)            │     │  ├─ FastAPI API (46 endpoints)  │
 │                             │     │  ├─ Intelligence engine         │
 │                             │     │  └─ APScheduler (email jobs)    │
 └─────────────────────────────┘     └──────────────┬──────────────────┘
@@ -224,7 +240,7 @@ All settings via `.env` file (see `.env.example`):
 
 ## Database
 
-PostgreSQL 16 with 9 tables:
+PostgreSQL 16 with 12 tables:
 
 | Table | Purpose |
 |-------|---------|
@@ -237,6 +253,9 @@ PostgreSQL 16 with 9 tables:
 | `focus_sessions` | Detected deep work periods |
 | `daily_notes` | User/AI annotations per day |
 | `baselines` | 30-day rolling metric averages for anomaly detection |
+| `projects` | User-defined projects with JSON matching rules |
+| `activity_tags` | Time-range tags from users, AI, or automation |
+| `streaks` | Consecutive-day streak records |
 
 ## License
 

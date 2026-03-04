@@ -147,3 +147,44 @@ class Baseline(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     details: Mapped[dict | None] = mapped_column(JSONB)
+
+
+class Project(Base):
+    __tablename__ = "projects"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    color: Mapped[str] = mapped_column(String(7), nullable=False, default="#6366f1")  # hex color
+    rules: Mapped[dict | None] = mapped_column(JSONB)  # matching rules as JSON array
+    # rules format: [{"type": "process", "pattern": "Code.exe"}, {"type": "title_contains", "pattern": "trackyr"}, {"type": "title_regex", "pattern": "JIRA-\\d+"}]
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ActivityTag(Base):
+    __tablename__ = "activity_tags"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tag_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source: Mapped[str] = mapped_column(String(50), nullable=False, default="user")  # "user", "ai", "auto"
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Streak(Base):
+    __tablename__ = "streaks"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    streak_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # "productive", "active", "focus", "early_start"
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    length_days: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    best_value: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)  # best day's score within streak
+    details: Mapped[dict | None] = mapped_column(JSONB)

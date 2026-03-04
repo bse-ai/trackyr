@@ -23,8 +23,10 @@ Two components:
 - `trackyr/db/` — models.py (SQLAlchemy ORM), engine.py, writer.py (batched writer with deque buffer)
 - `trackyr/tray.py` — system tray with green/yellow/red/gray circle icons
 - `trackyr/app.py` — orchestrator tying collector + tray together
-- `trackyr/api.py` — FastAPI endpoints (34 routes) for activity queries, intelligence, export, focus control
-- `trackyr/intelligence.py` — 14 functions: focus sessions, context switching, productivity, trends, idle patterns, heatmaps, workday detection, narratives, anomalies, engagement curves, baselines
+- `trackyr/api.py` — FastAPI endpoints (46 routes) for activity queries, intelligence, projects, tags, streaks, SSE streaming
+- `trackyr/intelligence.py` — 19 functions: focus sessions, context switching, productivity, trends, idle patterns, heatmaps, workday detection, narratives, anomalies, engagement curves, baselines, project detection, period comparison, streaks, report cards, title metadata
+- `trackyr/projects.py` — project detection with configurable rules + built-in heuristics
+- `trackyr/streaming.py` — Server-Sent Events for real-time activity streaming
 - `trackyr/reports.py` — daily/weekly/hourly report generation + HTML rendering
 - `trackyr/email_send.py` — Gmail SMTP sender
 - `trackyr/webhooks.py` — push events to OpenClaw gateway
@@ -33,7 +35,7 @@ Two components:
 
 ## Database
 
-PostgreSQL 16 on port 5434 in dedicated `trackyr-db` container. Nine tables:
+PostgreSQL 16 on port 5434 in dedicated `trackyr-db` container. Twelve tables:
 - `activity_samples` — one row per 5-sec sample (source of truth), includes device_id
 - `app_sessions` — contiguous time on one app
 - `daily_summaries` — one row per app per day
@@ -43,6 +45,9 @@ PostgreSQL 16 on port 5434 in dedicated `trackyr-db` container. Nine tables:
 - `focus_sessions` — detected deep work periods with quality scores
 - `daily_notes` — user/AI annotations per day (text + source tag)
 - `baselines` — 30-day rolling metric averages (nightly computed at 3 AM)
+- `projects` — user-defined projects with JSON matching rules (process, title_contains, title_regex)
+- `activity_tags` — time-range tags from users, AI, or automation
+- `streaks` — consecutive-day streak records (productive, active, focus, early_start)
 
 ## API Endpoints
 
@@ -85,6 +90,17 @@ Running on port 8099 via `trackyr-server` container:
 - `GET /api/v1/export/samples?start=&end=&format=` — export raw samples (CSV/JSON)
 - `GET /api/v1/export/sessions?start=&end=&format=` — export app sessions (CSV/JSON)
 
+### Projects, Tags & Gamification
+- `GET/POST /api/v1/projects` — project management (rules-based activity mapping)
+- `GET /api/v1/projects/{date}/breakdown` — time per project
+- `GET/POST /api/v1/tags`, `GET /api/v1/tags/{date}`, `DELETE /api/v1/tags/{id}` — activity tags
+- `GET /api/v1/compare?start1=&end1=&start2=&end2=` — period comparison
+- `GET /api/v1/streaks` — consecutive day streaks
+- `GET /api/v1/report-card/{date}` — letter-grade report card with GPA
+- `GET /api/v1/titles/{date}` — ticket IDs, repos, files from window titles
+- `GET /api/v1/stream` — Server-Sent Events for real-time activity
+- `GET /api/v1/stream/snapshot` — SSE client init snapshot
+
 ## Email Reports
 
 Daily report at 9 PM, weekly report Sunday 9 PM. Requires Gmail app password in `.env`.
@@ -123,7 +139,7 @@ Trackyr connects to [OpenClaw](https://github.com/bse-ai/openclaw) (AI assistant
 
 ### 1. Skill (query)
 - **Location**: `skills/trackyr-activity/` — copy to OpenClaw skills directory
-- **26 modes**: today, date, hours, weekly, current, timeline, focus, productivity, context-switches, trends, context, standup, goals, categories, search, health, heatmap, workday, narrative, anomalies, engagement, baselines, notes, focus-control, export-samples, export-sessions
+- **34 modes**: today, date, hours, weekly, current, timeline, focus, productivity, context-switches, trends, context, standup, goals, categories, search, health, heatmap, heatmap-week, workday, narrative, switch-patterns, anomalies, engagement, baselines, notes, export, projects, project-breakdown, tags, compare, streaks, report-card, titles, stream-snapshot
 - **Data flow**: User asks OpenClaw → agent triggers skill → script queries Trackyr API → structured data returned
 
 ### 2. Cron Templates (proactive)

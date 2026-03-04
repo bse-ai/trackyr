@@ -1,6 +1,6 @@
 ---
 name: trackyr-activity
-description: "Query desktop activity tracking data from Trackyr. Use when the user asks about: what they worked on, app usage time, productivity, activity history, focus sessions, context switching, goals, time tracking, or what app is currently active."
+description: "Query desktop activity tracking data from Trackyr. Use when the user asks about: what they worked on, app usage time, productivity, activity history, focus sessions, context switching, goals, time tracking, projects, report cards, streaks, comparisons, tags, or what app is currently active."
 metadata:
   forge-orchestrator:
     emoji: "\U0001F3AF"
@@ -48,6 +48,14 @@ python skills/trackyr-activity/scripts/trackyr_query.py --mode <MODE> [OPTIONS]
 | `baselines` | 30-day rolling baseline metrics | |
 | `notes` | Daily notes and annotations | `--date YYYY-MM-DD` |
 | `export` | Export raw data as JSON | `--start, --end YYYY-MM-DD` |
+| `projects` | List configured projects | |
+| `project-breakdown` | Time per project for a date | `--date YYYY-MM-DD` |
+| `tags` | Activity tags for a date | `--date YYYY-MM-DD` |
+| `compare` | Compare two date ranges side-by-side | `--start, --end, --start2, --end2 YYYY-MM-DD` |
+| `streaks` | Consecutive day streaks (productive, active, focus, early start) | |
+| `report-card` | Letter-grade report card for a day | `--date YYYY-MM-DD` |
+| `titles` | Extract ticket IDs, repos, files from window titles | `--date YYYY-MM-DD` |
+| `stream-snapshot` | Current SSE stream state | |
 
 ### Examples
 
@@ -99,6 +107,24 @@ python skills/trackyr-activity/scripts/trackyr_query.py --mode anomalies
 
 # Show my engagement curve
 python skills/trackyr-activity/scripts/trackyr_query.py --mode engagement
+
+# What projects was I working on?
+python skills/trackyr-activity/scripts/trackyr_query.py --mode project-breakdown
+
+# My report card for the day
+python skills/trackyr-activity/scripts/trackyr_query.py --mode report-card
+
+# How long is my productive streak?
+python skills/trackyr-activity/scripts/trackyr_query.py --mode streaks
+
+# Compare this week vs last week
+python skills/trackyr-activity/scripts/trackyr_query.py --mode compare --start 2026-02-24 --end 2026-02-28 --start2 2026-03-03 --end2 2026-03-07
+
+# What tickets/repos show up in my window titles?
+python skills/trackyr-activity/scripts/trackyr_query.py --mode titles
+
+# What is Trackyr seeing right now?
+python skills/trackyr-activity/scripts/trackyr_query.py --mode stream-snapshot
 ```
 
 ## Automation

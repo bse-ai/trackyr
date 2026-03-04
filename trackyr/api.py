@@ -16,8 +16,10 @@ from sqlalchemy import func, text
 
 from trackyr.config import cfg
 from trackyr.db.engine import get_session
+from fastapi.responses import StreamingResponse
 from trackyr.db.models import (
     ActivitySample,
+    ActivityTag,
     AppCategory,
     AppSession,
     Baseline,
@@ -25,22 +27,30 @@ from trackyr.db.models import (
     DailySummary,
     FocusSession,
     Goal,
+    Project,
+    Streak,
 )
 from trackyr.intelligence import (
     anomaly_detection,
+    compare_periods,
     compute_baselines,
+    compute_streaks,
     context_switch_count,
     context_switch_patterns,
     current_context,
     daily_narrative,
     detect_focus_sessions,
     engagement_curve,
+    extract_title_metadata,
     hourly_heatmap,
     idle_pattern_analysis,
     productivity_score,
+    report_card,
     trend_comparison,
     workday_detection,
 )
+from trackyr.projects import detect_projects
+from trackyr.streaming import activity_stream, format_sse_summary
 from trackyr.reports import generate_daily_report, generate_hours_report, generate_weekly_report
 
 log = logging.getLogger(__name__)
@@ -867,6 +877,208 @@ def export_sessions(start: date, end: date, format: str = "json"):
         return rows
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# Round 3: Projects, Tags, Comparison, Streaks, Report Card, Titles, SSE
+# ---------------------------------------------------------------------------
+
+
+class ProjectIn(BaseModel):
+    name: str
+    color: str = "#6366f1"
+    rules: list[dict] = []
+
+
+class TagIn(BaseModel):
+    tag_name: str
+    start_time: str  # ISO 8601
+    end_time: str  # ISO 8601
+    source: str = "user"
+    notes: str | None = None
+
+
+# --- Projects ---
+
+
+@app.get("/api/v1/projects")
+def list_projects():
+    session = get_session()
+    try:
+        projects = session.query(Project).all()
+        return [
+            {
+                "id": p.id,
+                "name": p.name,
+                "color": p.color,
+                "rules": p.rules or [],
+                "is_active": p.is_active,
+            }
+            for p in projects
+        ]
+    finally:
+        session.close()
+
+
+@app.post("/api/v1/projects")
+def create_project(body: ProjectIn):
+    session = get_session()
+    try:
+        p = Project(name=body.name, color=body.color, rules=body.rules)
+        session.add(p)
+        session.commit()
+        return {"id": p.id, "name": p.name, "color": p.color, "rules": p.rules}
+    finally:
+        session.close()
+
+
+@app.get("/api/v1/projects/{target_date}/breakdown")
+def project_breakdown(target_date: str):
+    try:
+        d = date.fromisoformat(target_date)
+    except ValueError:
+        raise HTTPException(400, "Invalid date format, use YYYY-MM-DD")
+    return detect_projects(d)
+
+
+# --- Tags ---
+
+
+@app.get("/api/v1/tags/{target_date}")
+def list_tags(target_date: str):
+    try:
+        d = date.fromisoformat(target_date)
+    except ValueError:
+        raise HTTPException(400, "Invalid date format")
+    day_start = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    day_end = day_start + timedelta(days=1)
+    session = get_session()
+    try:
+        tags = (
+            session.query(ActivityTag)
+            .filter(
+                ActivityTag.start_time >= day_start,
+                ActivityTag.start_time < day_end,
+            )
+            .order_by(ActivityTag.start_time)
+            .all()
+        )
+        return [
+            {
+                "id": t.id,
+                "tag_name": t.tag_name,
+                "start_time": t.start_time.isoformat(),
+                "end_time": t.end_time.isoformat(),
+                "source": t.source,
+                "notes": t.notes,
+            }
+            for t in tags
+        ]
+    finally:
+        session.close()
+
+
+@app.post("/api/v1/tags")
+def create_tag(body: TagIn):
+    session = get_session()
+    try:
+        start = datetime.fromisoformat(body.start_time)
+        end = datetime.fromisoformat(body.end_time)
+        tag = ActivityTag(
+            tag_name=body.tag_name,
+            start_time=start,
+            end_time=end,
+            source=body.source,
+            notes=body.notes,
+        )
+        session.add(tag)
+        session.commit()
+        return {"id": tag.id, "tag_name": tag.tag_name, "start_time": tag.start_time.isoformat(), "end_time": tag.end_time.isoformat()}
+    finally:
+        session.close()
+
+
+@app.delete("/api/v1/tags/{tag_id}")
+def delete_tag(tag_id: int):
+    session = get_session()
+    try:
+        tag = session.query(ActivityTag).filter(ActivityTag.id == tag_id).first()
+        if not tag:
+            raise HTTPException(404, "Tag not found")
+        session.delete(tag)
+        session.commit()
+        return {"deleted": tag_id}
+    finally:
+        session.close()
+
+
+# --- Comparison ---
+
+
+@app.get("/api/v1/compare")
+def compare(
+    start1: str = Query(..., description="Period 1 start (YYYY-MM-DD)"),
+    end1: str = Query(..., description="Period 1 end (YYYY-MM-DD)"),
+    start2: str = Query(..., description="Period 2 start (YYYY-MM-DD)"),
+    end2: str = Query(..., description="Period 2 end (YYYY-MM-DD)"),
+):
+    try:
+        s1, e1 = date.fromisoformat(start1), date.fromisoformat(end1)
+        s2, e2 = date.fromisoformat(start2), date.fromisoformat(end2)
+    except ValueError:
+        raise HTTPException(400, "Invalid date format")
+    return compare_periods(s1, e1, s2, e2)
+
+
+# --- Streaks ---
+
+
+@app.get("/api/v1/streaks")
+def streaks():
+    return compute_streaks()
+
+
+# --- Report Card ---
+
+
+@app.get("/api/v1/report-card/{target_date}")
+def get_report_card(target_date: str):
+    try:
+        d = date.fromisoformat(target_date)
+    except ValueError:
+        raise HTTPException(400, "Invalid date format")
+    return report_card(d)
+
+
+# --- Title Metadata ---
+
+
+@app.get("/api/v1/titles/{target_date}")
+def title_metadata(target_date: str):
+    try:
+        d = date.fromisoformat(target_date)
+    except ValueError:
+        raise HTTPException(400, "Invalid date format")
+    return extract_title_metadata(d)
+
+
+# --- SSE Streaming ---
+
+
+@app.get("/api/v1/stream")
+async def stream_activity():
+    """Server-Sent Events stream of live activity samples."""
+    return StreamingResponse(
+        activity_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/v1/stream/snapshot")
+def stream_snapshot():
+    """Current state snapshot for SSE client initialisation."""
+    return format_sse_summary()
 
 
 # ---------------------------------------------------------------------------

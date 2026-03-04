@@ -40,6 +40,9 @@ ALL_MODES = [
     "heatmap", "heatmap-week", "workday", "narrative",
     "switch-patterns", "anomalies", "engagement", "baselines",
     "notes", "export",
+    # Round 3
+    "projects", "project-breakdown", "tags", "compare",
+    "streaks", "report-card", "titles", "stream-snapshot",
 ]
 
 
@@ -428,6 +431,166 @@ def render_notes(data: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Render functions — Round 3
+# ---------------------------------------------------------------------------
+
+
+def render_projects(data: list[dict]) -> str:
+    if not data:
+        return "No projects defined yet. Use the API to create project rules."
+    lines = ["Projects", f"{'='*50}"]
+    for p in data:
+        rules_count = len(p.get("rules", []))
+        status = "active" if p.get("is_active") else "inactive"
+        lines.append(f"  {p.get('name', '?'):<25} {p.get('color', '')} ({rules_count} rules, {status})")
+    return "\n".join(lines)
+
+
+def render_project_breakdown(data: dict) -> str:
+    projects = data.get("projects", [])
+    if not projects:
+        return f"No project activity on {data.get('date', '?')}."
+    lines = [
+        f"Project Breakdown — {data.get('date', '?')}",
+        f"{'='*60}",
+        f"{'Project':<25} {'Time':>8} {'%':>6}",
+        f"{'-'*25} {'-'*8} {'-'*6}",
+    ]
+    for p in projects:
+        lines.append(
+            f"  {p.get('name', '?'):<23} {p.get('total_formatted', ''):>8} {p.get('percentage', 0):>5.1f}%"
+        )
+        for w in p.get("top_windows", [])[:3]:
+            lines.append(f"    \u2514 {w[:55]}")
+    unmatched = data.get("unmatched_formatted", "0m")
+    lines.append(f"\n  Unmatched: {unmatched}")
+    return "\n".join(lines)
+
+
+def render_tags(data: list[dict]) -> str:
+    if not data:
+        return "No tags for this date."
+    lines = ["Activity Tags", f"{'='*50}"]
+    for t in data:
+        start = t.get("start_time", "?")[:16]
+        end = t.get("end_time", "?")[:16]
+        lines.append(f"  [{t.get('source', '?')}] {t.get('tag_name', '?')} ({start} \u2014 {end})")
+        if t.get("notes"):
+            lines.append(f"         {t['notes']}")
+    return "\n".join(lines)
+
+
+def render_compare(data: dict) -> str:
+    p1 = data.get("period1", {})
+    p2 = data.get("period2", {})
+    m1 = p1.get("metrics", {})
+    m2 = p2.get("metrics", {})
+    deltas = data.get("deltas", {})
+
+    lines = [
+        "Period Comparison",
+        f"{'='*60}",
+        f"  Period 1: {p1.get('start', '?')} \u2014 {p1.get('end', '?')}",
+        f"  Period 2: {p2.get('start', '?')} \u2014 {p2.get('end', '?')}",
+        "",
+        f"{'Metric':<22} {'Period 1':>10} {'Period 2':>10} {'Delta':>10} {'%':>8}",
+        f"{'-'*22} {'-'*10} {'-'*10} {'-'*10} {'-'*8}",
+    ]
+    for key in ["total_seconds", "active_seconds", "idle_seconds", "total_clicks", "total_keys", "session_count"]:
+        v1 = m1.get(key, 0)
+        v2 = m2.get(key, 0)
+        d = deltas.get(key, 0)
+        pct = deltas.get(f"{key}_pct", 0)
+        label = key.replace("_", " ").title()
+        if "seconds" in key:
+            lines.append(f"  {label:<20} {_fmt(v1):>10} {_fmt(v2):>10} {_fmt(d):>10} {pct:>+7.1f}%")
+        else:
+            lines.append(f"  {label:<20} {v1:>10} {v2:>10} {d:>+10} {pct:>+7.1f}%")
+    return "\n".join(lines)
+
+
+def render_streaks(data: dict) -> str:
+    streaks = data.get("streaks", {})
+    if not streaks:
+        return "No streak data."
+    lines = ["Streaks", f"{'='*50}"]
+    for stype, info in streaks.items():
+        label = stype.replace("_", " ").title()
+        current = info.get("current", 0)
+        best = info.get("best", 0)
+        active = "ACTIVE" if info.get("is_active") else "broken"
+        lines.append(f"  {label:<20} Current: {current} days ({active})  |  Best: {best} days")
+        if info.get("best_start"):
+            lines.append(f"  {'':20} Best: {info['best_start']} \u2014 {info['best_end']}")
+    return "\n".join(lines)
+
+
+def render_report_card(data: dict) -> str:
+    grades = data.get("grades", {})
+    if not grades:
+        return f"No data for report card on {data.get('date', '?')}."
+    lines = [
+        f"Report Card — {data.get('date', '?')}",
+        f"{'='*50}",
+        f"  Overall: {data.get('overall_grade', '?')} (GPA {data.get('gpa', 0):.2f})",
+        "",
+        f"  {'Metric':<22} {'Grade':>6} {'Score':>8}",
+        f"  {'-'*22} {'-'*6} {'-'*8}",
+    ]
+    for metric, info in grades.items():
+        label = metric.replace("_", " ").title()
+        lines.append(f"  {label:<22} {info.get('grade', '?'):>6} {info.get('score', 0):>8.1f}")
+    lines.append(f"\n  {data.get('summary', '')}")
+    return "\n".join(lines)
+
+
+def render_titles(data: dict) -> str:
+    lines = [f"Title Metadata — {data.get('date', '?')}", f"{'='*50}"]
+
+    tickets = data.get("ticket_ids", [])
+    if tickets:
+        lines.append("\nTicket IDs:")
+        for t in tickets[:10]:
+            lines.append(f"  {t.get('id', '?')} ({t.get('count', 0)}x) — {', '.join(t.get('apps', []))}")
+
+    repos = data.get("repos", [])
+    if repos:
+        lines.append("\nRepositories:")
+        for r in repos[:10]:
+            lines.append(f"  {r.get('name', '?')} ({r.get('count', 0)}x, {_fmt(r.get('total_seconds', 0))})")
+
+    files = data.get("files", [])
+    if files:
+        lines.append("\nFiles:")
+        for f in files[:10]:
+            lines.append(f"  {f.get('path', '?')} ({f.get('count', 0)}x, .{f.get('extension', '')})")
+
+    branches = data.get("branches", [])
+    if branches:
+        lines.append("\nBranches:")
+        for b in branches[:10]:
+            lines.append(f"  {b.get('name', '?')} ({b.get('count', 0)}x)")
+
+    if not (tickets or repos or files or branches):
+        lines.append("  No metadata extracted from window titles.")
+
+    return "\n".join(lines)
+
+
+def render_stream_snapshot(data: dict) -> str:
+    status = data.get("status", "?")
+    if status != "ok":
+        return f"Stream status: {status}"
+    sample = data.get("latest_sample", {})
+    return (
+        f"Stream Snapshot (status: {status})\n"
+        f"  Latest: {sample.get('process_name', '?')} — {(sample.get('window_title', '') or '')[:60]}\n"
+        f"  Time: {sample.get('sampled_at', '?')}\n"
+        f"  Idle: {sample.get('is_idle', False)}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -444,8 +607,10 @@ def main():
     parser.add_argument("--days", type=int, default=7, help="Number of days for 'trends' mode (default: 7)")
     parser.add_argument("--query", "-q", help="Search query for 'search' mode")
     parser.add_argument("--app", help="Filter by app name for 'timeline' mode")
-    parser.add_argument("--start", help="Start date for 'export' mode (YYYY-MM-DD)")
-    parser.add_argument("--end", help="End date for 'export' mode (YYYY-MM-DD)")
+    parser.add_argument("--start", help="Start date for 'export'/'compare' mode (YYYY-MM-DD)")
+    parser.add_argument("--end", help="End date for 'export'/'compare' mode (YYYY-MM-DD)")
+    parser.add_argument("--start2", help="Period 2 start date for 'compare' mode (YYYY-MM-DD)")
+    parser.add_argument("--end2", help="Period 2 end date for 'compare' mode (YYYY-MM-DD)")
     parser.add_argument(
         "--format",
         choices=["text", "json"],
@@ -547,6 +712,34 @@ def main():
         end = args.end or target_date
         data = fetch(f"/export/samples?start={start}&end={end}&format=json")
         output = json.dumps(data, indent=2)
+    elif args.mode == "projects":
+        data = fetch("/projects")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_projects(data)
+    elif args.mode == "project-breakdown":
+        data = fetch(f"/projects/{target_date}/breakdown")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_project_breakdown(data)
+    elif args.mode == "tags":
+        data = fetch(f"/tags/{target_date}")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_tags(data)
+    elif args.mode == "compare":
+        s1 = args.start or target_date
+        e1 = args.end or target_date
+        s2 = args.start2 or target_date
+        e2 = args.end2 or target_date
+        data = fetch(f"/compare?start1={s1}&end1={e1}&start2={s2}&end2={e2}")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_compare(data)
+    elif args.mode == "streaks":
+        data = fetch("/streaks")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_streaks(data)
+    elif args.mode == "report-card":
+        data = fetch(f"/report-card/{target_date}")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_report_card(data)
+    elif args.mode == "titles":
+        data = fetch(f"/titles/{target_date}")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_titles(data)
+    elif args.mode == "stream-snapshot":
+        data = fetch("/stream/snapshot")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_stream_snapshot(data)
 
     # Handle unicode chars that may appear in window titles
     sys.stdout.reconfigure(errors="replace")
