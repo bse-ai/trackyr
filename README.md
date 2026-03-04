@@ -7,7 +7,7 @@ Personal Windows desktop activity tracker. Logs mouse clicks, keyboard activity,
 - **5-second sampling** of foreground window, idle state, mouse clicks, and keystroke counts
 - **System tray** icon with color-coded status (green=active, yellow=idle, red=DB error)
 - **REST API** with 67 endpoints — summaries, timeline, focus sessions, productivity, heatmaps, anomalies, projects, streaks, report cards, tags, SSE streaming, Pomodoro timer, app limits, monthly rollups, weekly digests
-- **Intelligence engine** (25 functions) — focus sessions, context switching, productivity, heatmaps, workday detection, narratives, anomalies, engagement, projects, comparison, streaks, report cards, title extraction, daily highlights, momentum, switch cost, monthly rollups, session classification, weekly digests
+- **Intelligence engine** (24 functions) — focus sessions, context switching, productivity, heatmaps, workday detection, narratives, anomalies, engagement, comparison, streaks, report cards, title extraction, daily highlights, momentum, switch cost, monthly rollups, session classification, weekly digests
 - **Email reports** — daily and weekly HTML summaries via Gmail
 - **[OpenClaw](https://github.com/bse-ai/openclaw) integration** — AI assistant skill + webhook events + cron automation templates
 - **Privacy-first** — keystroke counts only, never which keys. No screenshots, no network traffic.
