@@ -169,7 +169,7 @@ Install with: `forge-orchestrator cron add --from-file cron-templates/hourly-pro
 
 ## Notes
 
-- Trackyr must be running (`python -m trackyr` + `docker compose up -d`)
-- API runs on `http://localhost:8099`
+- Trackyr runs in Docker (`trackyr-server` container on port 8099, `trackyr-db` PostgreSQL on port 5434)
+- API is reachable at `http://host.docker.internal:8099` from inside Docker containers
 - Data is sampled every 5 seconds; keystroke counts only (no content captured)
 - Set app categories via `POST /api/v1/categories` to enable productivity scoring

@@ -30,7 +30,7 @@ import urllib.error
 import urllib.request
 from datetime import date as date_type
 
-BASE_URL = "http://localhost:8099/api/v1"
+BASE_URL = "http://host.docker.internal:8099/api/v1"
 
 ALL_MODES = [
     "today", "date", "hours", "weekly", "current",
