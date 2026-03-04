@@ -56,6 +56,15 @@ python skills/trackyr-activity/scripts/trackyr_query.py --mode <MODE> [OPTIONS]
 | `report-card` | Letter-grade report card for a day | `--date YYYY-MM-DD` |
 | `titles` | Extract ticket IDs, repos, files from window titles | `--date YYYY-MM-DD` |
 | `stream-snapshot` | Current SSE stream state | |
+| `highlight` | AI-ready daily highlight packet | `--date YYYY-MM-DD` |
+| `momentum` | 4-week productivity momentum score | |
+| `switch-cost` | Estimated time lost to context switching | `--date YYYY-MM-DD` |
+| `monthly` | Current month rollup report | |
+| `sessions` | Classified sessions (focus/meeting/break/shallow) | `--date YYYY-MM-DD` |
+| `digest` | Narrative weekly digest with ranked insights | |
+| `pomodoro-status` | Current Pomodoro timer state | |
+| `pomodoro-today` | Today's Pomodoro summary | |
+| `limits` | App time limits and current usage | |
 
 ### Examples
 
@@ -125,6 +134,27 @@ python skills/trackyr-activity/scripts/trackyr_query.py --mode titles
 
 # What is Trackyr seeing right now?
 python skills/trackyr-activity/scripts/trackyr_query.py --mode stream-snapshot
+
+# Give me the daily highlight for AI context
+python skills/trackyr-activity/scripts/trackyr_query.py --mode highlight
+
+# Is my productivity trending up?
+python skills/trackyr-activity/scripts/trackyr_query.py --mode momentum
+
+# How much time did I lose to context switching?
+python skills/trackyr-activity/scripts/trackyr_query.py --mode switch-cost
+
+# Monthly summary
+python skills/trackyr-activity/scripts/trackyr_query.py --mode monthly
+
+# Show classified sessions (focus/meeting/break)
+python skills/trackyr-activity/scripts/trackyr_query.py --mode sessions
+
+# Weekly digest with top insights
+python skills/trackyr-activity/scripts/trackyr_query.py --mode digest
+
+# Am I in a Pomodoro?
+python skills/trackyr-activity/scripts/trackyr_query.py --mode pomodoro-status
 ```
 
 ## Automation

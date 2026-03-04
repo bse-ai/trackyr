@@ -188,3 +188,66 @@ class Streak(Base):
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     best_value: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)  # best day's score within streak
     details: Mapped[dict | None] = mapped_column(JSONB)
+
+
+class PomodoroTimer(Base):
+    __tablename__ = "pomodoro_timers"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="idle")
+    # status values: "idle", "work", "short_break", "long_break", "paused", "completed"
+    work_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=25)
+    short_break_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    long_break_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=15)
+    long_break_every: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
+    phase_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    phase_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pomodoro_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    interruption_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    label: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PomodoroRecord(Base):
+    __tablename__ = "pomodoro_records"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    timer_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    phase: Mapped[str] = mapped_column(String(20), nullable=False)
+    # phase values: "work", "short_break", "long_break"
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    interruptions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    primary_app: Mapped[str | None] = mapped_column(String(255))
+
+
+class AppLimit(Base):
+    __tablename__ = "app_limits"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    process_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    daily_limit_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    warn_at_pct: Mapped[int] = mapped_column(Integer, nullable=False, default=80)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class LimitAlert(Base):
+    __tablename__ = "limit_alerts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    process_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    alert_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    # alert_type values: "warn", "exceeded"
+    fired_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    usage_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    limit_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    notified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

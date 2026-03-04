@@ -43,6 +43,10 @@ ALL_MODES = [
     # Round 3
     "projects", "project-breakdown", "tags", "compare",
     "streaks", "report-card", "titles", "stream-snapshot",
+    # Round 4
+    "highlight", "momentum", "switch-cost", "monthly",
+    "sessions", "digest", "pomodoro-status", "pomodoro-today",
+    "limits",
 ]
 
 
@@ -591,6 +595,171 @@ def render_stream_snapshot(data: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Render functions — Round 4
+# ---------------------------------------------------------------------------
+
+
+def render_highlight(data: dict) -> str:
+    lines = [
+        f"Daily Highlight — {data.get('date', '?')}",
+        f"{'='*60}",
+        f"  {data.get('one_liner', '')}",
+        "",
+        f"  Active:       {data.get('total_active_fmt', '?')}",
+        f"  Productive:   {data.get('productive_pct', 0):.0f}%",
+        f"  vs Baseline:  {data.get('vs_baseline_delta_pct', 0):+.1f}%",
+        f"  Focus blocks: {data.get('focus_sessions_count', 0)}",
+        f"  Switches:     {data.get('context_switches', 0)}",
+        f"  Grade:        {data.get('report_card_grade', '?')}",
+    ]
+    top = data.get("top_3_apps", [])
+    if top:
+        lines.append("\n  Top Apps:")
+        for a in top:
+            lines.append(f"    {a.get('process_name', '?'):<25} {a.get('fmt', '?')}")
+    longest = data.get("longest_focus_block", {})
+    if longest.get("duration_seconds", 0) > 0:
+        lines.append(f"\n  Longest focus: {longest.get('app', '?')} ({longest.get('duration_fmt', '?')})")
+    anomalies = data.get("anomalies", [])
+    if anomalies:
+        lines.append(f"\n  Anomalies: {', '.join(anomalies)}")
+    return "\n".join(lines)
+
+
+def render_momentum(data: dict) -> str:
+    return (
+        f"Momentum Score\n{'='*40}\n"
+        f"  Score:     {data.get('momentum_score', 0):+.1f}\n"
+        f"  Trend:     {data.get('trend', '?')}\n"
+        f"  Recent 14d avg: {_fmt(data.get('recent_14_day_avg_seconds', 0))}\n"
+        f"  Prior 14d avg:  {_fmt(data.get('prior_14_day_avg_seconds', 0))}\n"
+        f"  Best day:  {data.get('best_day_of_week', '?')}\n"
+        f"  Worst day: {data.get('worst_day_of_week', '?')}\n"
+        f"  Peak hour: {data.get('peak_hour_of_day', '?')}:00\n"
+        f"  {data.get('streak_context', '')}"
+    )
+
+
+def render_switch_cost(data: dict) -> str:
+    return (
+        f"Context Switch Cost — {data.get('date', '?')}\n{'='*40}\n"
+        f"  Switches:     {data.get('switch_count', 0)}\n"
+        f"  Per hour:     {data.get('switches_per_hour', 0):.1f}\n"
+        f"  Est. cost:    {data.get('estimated_cost_minutes', 0):.0f} min lost\n"
+        f"  Label:        {data.get('fragmentation_label', '?')}\n"
+        f"  Top culprit:  {data.get('most_disruptive_app', '?')}\n"
+        f"  Focus ratio:  {data.get('focus_to_switch_ratio', 0):.2f}"
+    )
+
+
+def render_monthly(data: dict) -> str:
+    lines = [
+        f"Monthly Report — {data.get('year', '?')}/{data.get('month', '?'):02d}",
+        f"{'='*50}",
+        f"  Working days:  {data.get('working_days', 0)} ({data.get('days_with_data', 0)} with data)",
+        f"  Total active:  {data.get('total_active_fmt', '?')}",
+        f"  Daily avg:     {data.get('avg_daily_active_fmt', '?')}",
+        f"  Productive:    {data.get('productive_pct', 0):.0f}%",
+        f"  Focus sessions:{data.get('total_focus_sessions', 0)}",
+    ]
+    best = data.get("best_day", {})
+    worst = data.get("worst_day", {})
+    if best:
+        lines.append(f"  Best day:      {best.get('date', '?')} ({_fmt(best.get('active_seconds', 0))})")
+    if worst:
+        lines.append(f"  Worst day:     {worst.get('date', '?')} ({_fmt(worst.get('active_seconds', 0))})")
+    top = data.get("top_apps", [])
+    if top:
+        lines.append("\n  Top Apps:")
+        for a in top[:8]:
+            lines.append(f"    {a.get('process_name', '?'):<25} {a.get('fmt', '?')}")
+    return "\n".join(lines)
+
+
+def render_sessions(data: dict) -> str:
+    summary = data.get("summary", {})
+    lines = [
+        f"Classified Sessions — {data.get('date', '?')}",
+        f"{'='*50}",
+        f"  Focus:    {summary.get('focus_minutes', 0):.0f} min",
+        f"  Meeting:  {summary.get('meeting_minutes', 0):.0f} min",
+        f"  Shallow:  {summary.get('shallow_minutes', 0):.0f} min",
+        f"  Break:    {summary.get('break_minutes', 0):.0f} min",
+        f"  Total:    {data.get('total_sessions', 0)} sessions",
+    ]
+    return "\n".join(lines)
+
+
+def render_digest(data: dict) -> str:
+    lines = [
+        f"Weekly Digest — ending {data.get('week_ending', '?')}",
+        f"{'='*60}",
+        f"  {data.get('week_summary_text', '')}",
+        "",
+    ]
+    for insight in data.get("insights", []):
+        lines.append(f"  * {insight.get('title', '?')}: {insight.get('body', '')}")
+    best = data.get("best_day", {})
+    worst = data.get("worst_day", {})
+    if best:
+        lines.append(f"\n  Best day:  {best.get('date', '?')} — {best.get('reason', '')}")
+    if worst:
+        lines.append(f"  Worst day: {worst.get('date', '?')} — {worst.get('reason', '')}")
+    suggestion = data.get("next_week_suggestion", "")
+    if suggestion:
+        lines.append(f"\n  Suggestion: {suggestion}")
+    return "\n".join(lines)
+
+
+def render_pomodoro_status(data: dict) -> str:
+    if not data.get("active"):
+        return "No active Pomodoro timer."
+    remaining = data.get("seconds_remaining")
+    rm = f"{remaining // 60}m {remaining % 60}s" if remaining is not None else "?"
+    return (
+        f"Pomodoro Timer\n{'='*40}\n"
+        f"  Status:     {data.get('status', '?')}\n"
+        f"  Label:      {data.get('label', '-')}\n"
+        f"  Remaining:  {rm}\n"
+        f"  Pomodoros:  {data.get('pomodoro_count', 0)}\n"
+        f"  Interrupts: {data.get('interruption_count', 0)}"
+    )
+
+
+def render_pomodoro_today(data: dict) -> str:
+    lines = [
+        f"Pomodoro Today — {data.get('date', '?')}",
+        f"{'='*40}",
+        f"  Completed: {data.get('pomodoros_completed', 0)}",
+        f"  Interrupted: {data.get('pomodoros_interrupted', 0)}",
+        f"  Focus time: {data.get('total_focus_minutes', 0):.0f} min",
+        f"  Break time: {data.get('total_break_minutes', 0):.0f} min",
+        f"  Interruptions: {data.get('total_interruptions', 0)}",
+    ]
+    return "\n".join(lines)
+
+
+def render_limits(data: list[dict]) -> str:
+    if not data:
+        return "No app limits configured."
+    lines = [
+        "App Time Limits",
+        f"{'='*60}",
+        f"  {'App':<25} {'Used':>8} {'Limit':>8} {'%':>6} {'Status':>10}",
+        f"  {'-'*25} {'-'*8} {'-'*8} {'-'*6} {'-'*10}",
+    ]
+    for lim in data:
+        lines.append(
+            f"  {lim.get('process_name', '?'):<25} "
+            f"{_fmt(lim.get('usage_seconds', 0)):>8} "
+            f"{_fmt(lim.get('daily_limit_seconds', 0)):>8} "
+            f"{lim.get('usage_pct', 0):>5.1f}% "
+            f"{lim.get('status', '?'):>10}"
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -740,6 +909,33 @@ def main():
     elif args.mode == "stream-snapshot":
         data = fetch("/stream/snapshot")
         output = json.dumps(data, indent=2) if args.format == "json" else render_stream_snapshot(data)
+    elif args.mode == "highlight":
+        data = fetch(f"/highlight/{target_date}")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_highlight(data)
+    elif args.mode == "momentum":
+        data = fetch("/momentum")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_momentum(data)
+    elif args.mode == "switch-cost":
+        data = fetch(f"/context-switches/{target_date}/cost")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_switch_cost(data)
+    elif args.mode == "monthly":
+        data = fetch("/monthly/current")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_monthly(data)
+    elif args.mode == "sessions":
+        data = fetch(f"/sessions/{target_date}/classified")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_sessions(data)
+    elif args.mode == "digest":
+        data = fetch("/weekly/digest")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_digest(data)
+    elif args.mode == "pomodoro-status":
+        data = fetch("/pomodoro/status")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_pomodoro_status(data)
+    elif args.mode == "pomodoro-today":
+        data = fetch("/pomodoro/today")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_pomodoro_today(data)
+    elif args.mode == "limits":
+        data = fetch("/limits")
+        output = json.dumps(data, indent=2) if args.format == "json" else render_limits(data)
 
     # Handle unicode chars that may appear in window titles
     sys.stdout.reconfigure(errors="replace")

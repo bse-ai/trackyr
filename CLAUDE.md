@@ -23,10 +23,11 @@ Two components:
 - `trackyr/db/` — models.py (SQLAlchemy ORM), engine.py, writer.py (batched writer with deque buffer)
 - `trackyr/tray.py` — system tray with green/yellow/red/gray circle icons
 - `trackyr/app.py` — orchestrator tying collector + tray together
-- `trackyr/api.py` — FastAPI endpoints (46 routes) for activity queries, intelligence, projects, tags, streaks, SSE streaming
-- `trackyr/intelligence.py` — 19 functions: focus sessions, context switching, productivity, trends, idle patterns, heatmaps, workday detection, narratives, anomalies, engagement curves, baselines, project detection, period comparison, streaks, report cards, title metadata
+- `trackyr/api.py` — FastAPI endpoints (67 routes) for activity queries, intelligence, projects, tags, Pomodoro, limits, SSE streaming
+- `trackyr/intelligence.py` — 25 functions: focus sessions, context switching, productivity, trends, idle patterns, heatmaps, workday detection, narratives, anomalies, engagement curves, baselines, project detection, comparison, streaks, report cards, title metadata, highlights, momentum, switch cost, monthly rollups, session classification, weekly digests
 - `trackyr/projects.py` — project detection with configurable rules + built-in heuristics
 - `trackyr/streaming.py` — Server-Sent Events for real-time activity streaming
+- `trackyr/pomodoro.py` — Pomodoro timer state machine (start/pause/resume/skip/stop/interrupt)
 - `trackyr/reports.py` — daily/weekly/hourly report generation + HTML rendering
 - `trackyr/email_send.py` — Gmail SMTP sender
 - `trackyr/webhooks.py` — push events to OpenClaw gateway
@@ -35,7 +36,7 @@ Two components:
 
 ## Database
 
-PostgreSQL 16 on port 5434 in dedicated `trackyr-db` container. Twelve tables:
+PostgreSQL 16 on port 5434 in dedicated `trackyr-db` container. Sixteen tables:
 - `activity_samples` — one row per 5-sec sample (source of truth), includes device_id
 - `app_sessions` — contiguous time on one app
 - `daily_summaries` — one row per app per day
@@ -48,6 +49,10 @@ PostgreSQL 16 on port 5434 in dedicated `trackyr-db` container. Twelve tables:
 - `projects` — user-defined projects with JSON matching rules (process, title_contains, title_regex)
 - `activity_tags` — time-range tags from users, AI, or automation
 - `streaks` — consecutive-day streak records (productive, active, focus, early_start)
+- `pomodoro_timers` — active Pomodoro timer state (status, phase timing, counts)
+- `pomodoro_records` — completed Pomodoro phases (work/break history)
+- `app_limits` — per-app daily time budgets with warning thresholds
+- `limit_alerts` — fired limit alerts (warn/exceeded)
 
 ## API Endpoints
 
@@ -101,6 +106,23 @@ Running on port 8099 via `trackyr-server` container:
 - `GET /api/v1/stream` — Server-Sent Events for real-time activity
 - `GET /api/v1/stream/snapshot` — SSE client init snapshot
 
+### Intelligence & Analytics
+- `GET /api/v1/highlight/today`, `GET /api/v1/highlight/{date}` — AI-ready daily highlight packet
+- `GET /api/v1/momentum` — 4-week productivity momentum score
+- `GET /api/v1/context-switches/{date}/cost` — context switch time cost estimate
+- `GET /api/v1/monthly/current`, `GET /api/v1/monthly/{year}/{month}` — monthly rollup
+- `GET /api/v1/sessions/{date}/classified` — session type classification
+- `GET /api/v1/weekly/digest` — narrative weekly digest with insights
+
+### Pomodoro Timer
+- `POST /api/v1/pomodoro/start|pause|resume|skip|stop|interrupt` — timer control
+- `GET /api/v1/pomodoro/status` — current state
+- `GET /api/v1/pomodoro/today`, `GET /api/v1/pomodoro/history/{date}` — history
+
+### App Time Limits
+- `GET/POST /api/v1/limits`, `DELETE /api/v1/limits/{id}` — limit management
+- `GET /api/v1/limits/alerts/today` — fired alerts
+
 ## Email Reports
 
 Daily report at 9 PM, weekly report Sunday 9 PM. Requires Gmail app password in `.env`.
@@ -139,7 +161,7 @@ Trackyr connects to [OpenClaw](https://github.com/bse-ai/openclaw) (AI assistant
 
 ### 1. Skill (query)
 - **Location**: `skills/trackyr-activity/` — copy to OpenClaw skills directory
-- **34 modes**: today, date, hours, weekly, current, timeline, focus, productivity, context-switches, trends, context, standup, goals, categories, search, health, heatmap, heatmap-week, workday, narrative, switch-patterns, anomalies, engagement, baselines, notes, export, projects, project-breakdown, tags, compare, streaks, report-card, titles, stream-snapshot
+- **43 modes**: today, date, hours, weekly, current, timeline, focus, productivity, context-switches, trends, context, standup, goals, categories, search, health, heatmap, heatmap-week, workday, narrative, switch-patterns, anomalies, engagement, baselines, notes, export, projects, project-breakdown, tags, compare, streaks, report-card, titles, stream-snapshot, highlight, momentum, switch-cost, monthly, sessions, digest, pomodoro-status, pomodoro-today, limits
 - **Data flow**: User asks OpenClaw → agent triggers skill → script queries Trackyr API → structured data returned
 
 ### 2. Cron Templates (proactive)

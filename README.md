@@ -6,8 +6,8 @@ Personal Windows desktop activity tracker. Logs mouse clicks, keyboard activity,
 
 - **5-second sampling** of foreground window, idle state, mouse clicks, and keystroke counts
 - **System tray** icon with color-coded status (green=active, yellow=idle, red=DB error)
-- **REST API** with 46 endpoints — summaries, timeline, focus sessions, productivity scoring, heatmaps, anomaly detection, projects, streaks, report cards, tags, SSE streaming
-- **Intelligence engine** — focus sessions, context switching, productivity scoring, heatmaps, workday detection, narratives, anomaly detection, engagement curves, project detection, period comparison, streaks, report cards, title metadata extraction
+- **REST API** with 67 endpoints — summaries, timeline, focus sessions, productivity, heatmaps, anomalies, projects, streaks, report cards, tags, SSE streaming, Pomodoro timer, app limits, monthly rollups, weekly digests
+- **Intelligence engine** (25 functions) — focus sessions, context switching, productivity, heatmaps, workday detection, narratives, anomalies, engagement, projects, comparison, streaks, report cards, title extraction, daily highlights, momentum, switch cost, monthly rollups, session classification, weekly digests
 - **Email reports** — daily and weekly HTML summaries via Gmail
 - **[OpenClaw](https://github.com/bse-ai/openclaw) integration** — AI assistant skill + webhook events + cron automation templates
 - **Privacy-first** — keystroke counts only, never which keys. No screenshots, no network traffic.
@@ -106,6 +106,42 @@ The API server runs on `http://localhost:8099` inside the `trackyr-server` conta
 | `GET /api/v1/stream` | Server-Sent Events for live activity (real-time) |
 | `GET /api/v1/stream/snapshot` | Current stream state for SSE client init |
 
+### Intelligence & Analytics
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/highlight/today` | AI-ready daily highlight packet (single endpoint for LLM context) |
+| `GET /api/v1/highlight/{date}` | Highlight for a specific date |
+| `GET /api/v1/momentum` | 4-week productivity momentum score and trend |
+| `GET /api/v1/context-switches/{date}/cost` | Estimated time lost to context switching |
+| `GET /api/v1/monthly/current` | Current month rollup report |
+| `GET /api/v1/monthly/{year}/{month}` | Specific month rollup |
+| `GET /api/v1/sessions/{date}/classified` | Sessions classified as focus/meeting/break/shallow |
+| `GET /api/v1/weekly/digest` | Narrative weekly digest with 5 ranked insights |
+
+### Pomodoro Timer
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/v1/pomodoro/start` | Start a Pomodoro (25/5/15 min configurable) |
+| `POST /api/v1/pomodoro/pause` | Pause the timer |
+| `POST /api/v1/pomodoro/resume` | Resume paused timer |
+| `POST /api/v1/pomodoro/skip` | Skip to next phase |
+| `POST /api/v1/pomodoro/stop` | Stop/abandon timer |
+| `POST /api/v1/pomodoro/interrupt` | Record an interruption |
+| `GET /api/v1/pomodoro/status` | Current timer state with seconds remaining |
+| `GET /api/v1/pomodoro/today` | Today's Pomodoro summary |
+| `GET /api/v1/pomodoro/history/{date}` | Pomodoro history for a date |
+
+### App Time Limits
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/limits` | All limits with today's usage and status |
+| `POST /api/v1/limits` | Create an app time limit |
+| `DELETE /api/v1/limits/{id}` | Delete a limit |
+| `GET /api/v1/limits/alerts/today` | Today's fired limit alerts |
+
 ```bash
 # Quick examples
 curl http://localhost:8099/api/v1/summary/today
@@ -150,7 +186,7 @@ OpenClaw auto-discovers the skill on next agent load. Then ask:
 - *"Am I context switching too much?"*
 - *"Generate my standup"*
 
-The skill supports 34 query modes — see `skills/trackyr-activity/SKILL.md` for the full list.
+The skill supports 43 query modes — see `skills/trackyr-activity/SKILL.md` for the full list.
 
 ### 2. Cron Automation — Proactive Insights
 
@@ -227,7 +263,7 @@ All settings via `.env` file (see `.env.example`):
 │  python -m trackyr          │     │  trackyr-db (PostgreSQL:5434)   │
 │  ├─ Main: system tray       │────▶│                                 │
 │  └─ Daemon: collector loop  │     │  trackyr-server (:8099)         │
-│     (5s samples)            │     │  ├─ FastAPI API (46 endpoints)  │
+│     (5s samples)            │     │  ├─ FastAPI API (67 endpoints)  │
 │                             │     │  ├─ Intelligence engine         │
 │                             │     │  └─ APScheduler (email jobs)    │
 └─────────────────────────────┘     └──────────────┬──────────────────┘
@@ -240,7 +276,7 @@ All settings via `.env` file (see `.env.example`):
 
 ## Database
 
-PostgreSQL 16 with 12 tables:
+PostgreSQL 16 with 16 tables:
 
 | Table | Purpose |
 |-------|---------|
@@ -256,6 +292,10 @@ PostgreSQL 16 with 12 tables:
 | `projects` | User-defined projects with JSON matching rules |
 | `activity_tags` | Time-range tags from users, AI, or automation |
 | `streaks` | Consecutive-day streak records |
+| `pomodoro_timers` | Active Pomodoro timer state |
+| `pomodoro_records` | Completed Pomodoro phase history |
+| `app_limits` | Per-app daily time budgets |
+| `limit_alerts` | Fired limit warning/exceeded alerts |
 
 ## License
 

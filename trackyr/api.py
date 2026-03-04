@@ -21,20 +21,24 @@ from trackyr.db.models import (
     ActivitySample,
     ActivityTag,
     AppCategory,
+    AppLimit,
     AppSession,
     Baseline,
     DailyNote,
     DailySummary,
     FocusSession,
     Goal,
+    LimitAlert,
     Project,
     Streak,
 )
 from trackyr.intelligence import (
     anomaly_detection,
+    classify_sessions,
     compare_periods,
     compute_baselines,
     compute_streaks,
+    context_switch_cost,
     context_switch_count,
     context_switch_patterns,
     current_context,
@@ -42,12 +46,27 @@ from trackyr.intelligence import (
     detect_focus_sessions,
     engagement_curve,
     extract_title_metadata,
+    highlight_packet,
     hourly_heatmap,
     idle_pattern_analysis,
+    momentum_score,
+    monthly_rollup,
     productivity_score,
     report_card,
     trend_comparison,
+    weekly_digest,
     workday_detection,
+)
+from trackyr.pomodoro import (
+    get_history as pomo_get_history,
+    get_status as pomo_get_status,
+    get_today_summary as pomo_get_today,
+    interrupt_timer as pomo_interrupt,
+    pause_timer as pomo_pause,
+    resume_timer as pomo_resume,
+    skip_phase as pomo_skip,
+    start_timer as pomo_start,
+    stop_timer as pomo_stop,
 )
 from trackyr.projects import detect_projects
 from trackyr.streaming import activity_stream, format_sse_summary
@@ -1079,6 +1098,251 @@ async def stream_activity():
 def stream_snapshot():
     """Current state snapshot for SSE client initialisation."""
     return format_sse_summary()
+
+
+# ---------------------------------------------------------------------------
+# Round 4: Highlights, Pomodoro, Sessions, Limits, Momentum, Monthly, Digest
+# ---------------------------------------------------------------------------
+
+
+class LimitIn(BaseModel):
+    process_name: str
+    daily_limit_seconds: int
+    warn_at_pct: int = 80
+
+
+class PomodoroStartIn(BaseModel):
+    label: str | None = None
+    work_minutes: int = 25
+    short_break_minutes: int = 5
+    long_break_minutes: int = 15
+
+
+# --- Daily Highlight ---
+
+
+@app.get("/api/v1/highlight/today")
+def highlight_today():
+    return highlight_packet()
+
+
+@app.get("/api/v1/highlight/{target_date}")
+def highlight_date(target_date: str):
+    try:
+        d = date.fromisoformat(target_date)
+    except ValueError:
+        raise HTTPException(400, "Invalid date format")
+    return highlight_packet(d)
+
+
+# --- Momentum ---
+
+
+@app.get("/api/v1/momentum")
+def get_momentum():
+    return momentum_score()
+
+
+# --- Context Switch Cost ---
+
+
+@app.get("/api/v1/context-switches/{target_date}/cost")
+def switch_cost(target_date: str):
+    try:
+        d = date.fromisoformat(target_date)
+    except ValueError:
+        raise HTTPException(400, "Invalid date format")
+    return context_switch_cost(d)
+
+
+# --- Monthly Rollup ---
+
+
+@app.get("/api/v1/monthly/current")
+def monthly_current():
+    today = date.today()
+    return monthly_rollup(today.year, today.month)
+
+
+@app.get("/api/v1/monthly/{year}/{month}")
+def monthly_date(year: int, month: int):
+    if month < 1 or month > 12:
+        raise HTTPException(400, "Invalid month")
+    return monthly_rollup(year, month)
+
+
+# --- Session Classifier ---
+
+
+@app.get("/api/v1/sessions/{target_date}/classified")
+def sessions_classified(target_date: str):
+    try:
+        d = date.fromisoformat(target_date)
+    except ValueError:
+        raise HTTPException(400, "Invalid date format")
+    return classify_sessions(d)
+
+
+# --- Weekly Digest ---
+
+
+@app.get("/api/v1/weekly/digest")
+def get_weekly_digest():
+    return weekly_digest()
+
+
+# --- Pomodoro Timer ---
+
+
+@app.post("/api/v1/pomodoro/start")
+def pomodoro_start(body: PomodoroStartIn):
+    return pomo_start(
+        label=body.label,
+        work_minutes=body.work_minutes,
+        short_break_minutes=body.short_break_minutes,
+        long_break_minutes=body.long_break_minutes,
+    )
+
+
+@app.get("/api/v1/pomodoro/status")
+def pomodoro_status():
+    return pomo_get_status()
+
+
+@app.post("/api/v1/pomodoro/pause")
+def pomodoro_pause():
+    return pomo_pause()
+
+
+@app.post("/api/v1/pomodoro/resume")
+def pomodoro_resume():
+    return pomo_resume()
+
+
+@app.post("/api/v1/pomodoro/skip")
+def pomodoro_skip():
+    return pomo_skip()
+
+
+@app.post("/api/v1/pomodoro/stop")
+def pomodoro_stop():
+    return pomo_stop()
+
+
+@app.post("/api/v1/pomodoro/interrupt")
+def pomodoro_interrupt():
+    return pomo_interrupt()
+
+
+@app.get("/api/v1/pomodoro/today")
+def pomodoro_today():
+    return pomo_get_today()
+
+
+@app.get("/api/v1/pomodoro/history/{target_date}")
+def pomodoro_history(target_date: str):
+    try:
+        d = date.fromisoformat(target_date)
+    except ValueError:
+        raise HTTPException(400, "Invalid date format")
+    return pomo_get_history(d)
+
+
+# --- App Time Limits ---
+
+
+@app.get("/api/v1/limits")
+def list_limits():
+    session = get_session()
+    try:
+        limits = session.query(AppLimit).filter(AppLimit.active == True).all()  # noqa: E712
+        today = date.today()
+        result = []
+        for lim in limits:
+            # Get today's usage
+            usage_row = (
+                session.query(func.sum(DailySummary.total_seconds))
+                .filter(
+                    DailySummary.process_name == lim.process_name,
+                    DailySummary.date == today,
+                )
+                .scalar()
+            ) or 0
+            pct = round(usage_row / lim.daily_limit_seconds * 100, 1) if lim.daily_limit_seconds > 0 else 0
+            status = "exceeded" if pct >= 100 else ("warn" if pct >= lim.warn_at_pct else "ok")
+            result.append({
+                "id": lim.id,
+                "process_name": lim.process_name,
+                "daily_limit_seconds": lim.daily_limit_seconds,
+                "warn_at_pct": lim.warn_at_pct,
+                "usage_seconds": usage_row,
+                "usage_pct": pct,
+                "status": status,
+            })
+        return result
+    finally:
+        session.close()
+
+
+@app.post("/api/v1/limits")
+def create_limit(body: LimitIn):
+    session = get_session()
+    try:
+        lim = AppLimit(
+            process_name=body.process_name,
+            daily_limit_seconds=body.daily_limit_seconds,
+            warn_at_pct=body.warn_at_pct,
+        )
+        session.add(lim)
+        session.commit()
+        return {"id": lim.id, "process_name": lim.process_name, "daily_limit_seconds": lim.daily_limit_seconds}
+    finally:
+        session.close()
+
+
+@app.delete("/api/v1/limits/{limit_id}")
+def delete_limit(limit_id: int):
+    session = get_session()
+    try:
+        lim = session.query(AppLimit).filter(AppLimit.id == limit_id).first()
+        if not lim:
+            raise HTTPException(404, "Limit not found")
+        session.delete(lim)
+        session.commit()
+        return {"deleted": limit_id}
+    finally:
+        session.close()
+
+
+@app.get("/api/v1/limits/alerts/today")
+def limit_alerts_today():
+    session = get_session()
+    try:
+        today = date.today()
+        day_start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+        day_end = day_start + timedelta(days=1)
+        alerts = (
+            session.query(LimitAlert)
+            .filter(
+                LimitAlert.fired_at >= day_start,
+                LimitAlert.fired_at < day_end,
+            )
+            .order_by(LimitAlert.fired_at.desc())
+            .all()
+        )
+        return [
+            {
+                "id": a.id,
+                "process_name": a.process_name,
+                "alert_type": a.alert_type,
+                "fired_at": a.fired_at.isoformat(),
+                "usage_seconds": a.usage_seconds,
+                "limit_seconds": a.limit_seconds,
+            }
+            for a in alerts
+        ]
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------

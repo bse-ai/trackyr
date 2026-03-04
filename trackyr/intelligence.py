@@ -3140,3 +3140,923 @@ def extract_title_metadata(target_date: date | None = None) -> dict:
         }
     finally:
         session.close()
+
+
+# Try to import Baseline model; gracefully degrade if it doesn't exist yet.
+try:
+    from trackyr.db.models import Baseline  # type: ignore[attr-defined]
+except ImportError:
+    Baseline = None  # type: ignore[assignment,misc]
+
+
+# ---------------------------------------------------------------------------
+# 20. highlight_packet
+# ---------------------------------------------------------------------------
+
+def highlight_packet(target_date: date | None = None) -> dict:
+    """AI-ready daily highlight — a single structured payload for an LLM system prompt.
+
+    Calls existing intelligence functions to assemble a comprehensive snapshot
+    of the day, including a one-liner summary, top apps, focus stats, anomalies,
+    streak info, and a pre-formatted AI prompt summary string.
+    """
+    if target_date is None:
+        target_date = _today()
+
+    try:
+        # Gather data from existing intelligence functions
+        prod = productivity_score(target_date)
+        focus_sessions = detect_focus_sessions(target_date)
+        ctx_switches = context_switch_count(target_date)
+        anomalies_data = anomaly_detection(target_date)
+        streaks_data = compute_streaks()
+        eng = engagement_curve(target_date)
+        card = report_card(target_date)
+
+        # Query DailySummary for top apps and total active time
+        session = get_session()
+        try:
+            summaries = (
+                session.query(DailySummary)
+                .filter(DailySummary.date == target_date)
+                .order_by(DailySummary.total_seconds.desc())
+                .all()
+            )
+
+            total_active_seconds = sum(s.total_seconds for s in summaries)
+
+            # Top 3 apps
+            top_3_apps = [
+                {
+                    "process_name": s.process_name,
+                    "seconds": s.total_seconds,
+                    "fmt": _fmt_duration(s.total_seconds),
+                }
+                for s in summaries[:3]
+            ]
+
+            # Query ActivitySample for idle time
+            day_start, day_end = _day_bounds(target_date)
+            idle_count = (
+                session.query(func.count(ActivitySample.id))
+                .filter(
+                    ActivitySample.sampled_at >= day_start,
+                    ActivitySample.sampled_at < day_end,
+                    ActivitySample.is_idle == True,  # noqa: E712
+                )
+                .scalar()
+            ) or 0
+            total_idle_seconds = idle_count * cfg.sample_interval
+
+            # Baseline delta
+            vs_baseline_delta_pct = 0.0
+            if Baseline is not None:
+                try:
+                    baseline_row = (
+                        session.query(Baseline)
+                        .filter(Baseline.metric_name == "total_active_seconds")
+                        .order_by(Baseline.computed_at.desc())
+                        .first()
+                    )
+                    if baseline_row and baseline_row.avg_value > 0:
+                        vs_baseline_delta_pct = round(
+                            ((total_active_seconds - baseline_row.avg_value)
+                             / baseline_row.avg_value) * 100, 1
+                        )
+                except Exception:
+                    log.warning("Could not query Baseline for highlight_packet")
+
+        finally:
+            session.close()
+
+        # Productive percentage
+        productive_pct = prod.get("productivity_pct", 0.0)
+
+        # Longest focus block
+        longest_focus_block: dict
+        if focus_sessions:
+            best = max(focus_sessions, key=lambda f: f["duration_seconds"])
+            longest_focus_block = {
+                "app": best["primary_app"],
+                "duration_seconds": best["duration_seconds"],
+                "duration_fmt": best["duration_fmt"],
+            }
+        else:
+            longest_focus_block = {"app": "", "duration_seconds": 0.0, "duration_fmt": "0m"}
+
+        # Context switches
+        total_switches = ctx_switches.get("total_switches", 0)
+
+        # Distraction ratio
+        distraction_ratio = round(1.0 - productive_pct / 100.0, 3) if productive_pct > 0 else 1.0
+
+        # Report card grade
+        report_card_grade = card.get("overall_grade", "F")
+
+        # Anomaly type strings
+        anomaly_types = [a["type"] for a in anomalies_data.get("anomalies", [])]
+
+        # Streak info — pick the most interesting active streak
+        streaks = streaks_data.get("streaks", {})
+        best_streak_type = ""
+        best_streak_length = 0
+        for stype, sdata in streaks.items():
+            if sdata.get("current", 0) > best_streak_length:
+                best_streak_length = sdata["current"]
+                best_streak_type = stype
+        streak_info = {"type": best_streak_type, "current_length": best_streak_length}
+
+        # Build one-liner
+        top_app_name = top_3_apps[0]["process_name"] if top_3_apps else "unknown"
+        focus_time_fmt = _fmt_duration(longest_focus_block["duration_seconds"])
+        if productive_pct >= 70:
+            tone = "Solid coding day"
+        elif productive_pct >= 50:
+            tone = "Decent day"
+        elif productive_pct >= 30:
+            tone = "Mixed day"
+        else:
+            tone = "Light day"
+
+        one_liner = (
+            f"{tone} — {_fmt_duration(total_active_seconds)} of active time, "
+            f"mostly in {top_app_name}."
+        )
+        if longest_focus_block["duration_seconds"] >= 1800:
+            one_liner = (
+                f"{tone} — {focus_time_fmt} of deep work, "
+                f"mostly in {longest_focus_block['app']}."
+            )
+
+        # Build AI prompt summary
+        ai_prompt_summary = (
+            f"Date: {target_date.isoformat()}. "
+            f"Active: {_fmt_duration(total_active_seconds)}. "
+            f"Productive: {productive_pct}%. "
+            f"Grade: {report_card_grade}. "
+            f"Focus sessions: {len(focus_sessions)}. "
+            f"Context switches: {total_switches}. "
+            f"Top apps: {', '.join(a['process_name'] for a in top_3_apps)}. "
+            f"Longest focus: {longest_focus_block['app']} ({focus_time_fmt}). "
+        )
+        if anomaly_types:
+            ai_prompt_summary += f"Anomalies: {', '.join(anomaly_types)}. "
+        if best_streak_length > 1:
+            ai_prompt_summary += f"Streak: {best_streak_type} x{best_streak_length} days."
+
+        return {
+            "date": target_date.isoformat(),
+            "one_liner": one_liner,
+            "total_active_seconds": total_active_seconds,
+            "total_active_fmt": _fmt_duration(total_active_seconds),
+            "productive_pct": productive_pct,
+            "vs_baseline_delta_pct": vs_baseline_delta_pct,
+            "longest_focus_block": longest_focus_block,
+            "top_3_apps": top_3_apps,
+            "focus_sessions_count": len(focus_sessions),
+            "context_switches": total_switches,
+            "distraction_ratio": distraction_ratio,
+            "report_card_grade": report_card_grade,
+            "anomalies": anomaly_types,
+            "streak_info": streak_info,
+            "ai_prompt_summary": ai_prompt_summary,
+        }
+    except Exception:
+        log.exception("Error building highlight packet for %s", target_date)
+        return {
+            "date": (target_date or _today()).isoformat(),
+            "one_liner": "",
+            "total_active_seconds": 0.0,
+            "total_active_fmt": "0m",
+            "productive_pct": 0.0,
+            "vs_baseline_delta_pct": 0.0,
+            "longest_focus_block": {"app": "", "duration_seconds": 0.0, "duration_fmt": "0m"},
+            "top_3_apps": [],
+            "focus_sessions_count": 0,
+            "context_switches": 0,
+            "distraction_ratio": 1.0,
+            "report_card_grade": "F",
+            "anomalies": [],
+            "streak_info": {"type": "", "current_length": 0},
+            "ai_prompt_summary": "",
+        }
+
+
+# ---------------------------------------------------------------------------
+# 21. momentum_score
+# ---------------------------------------------------------------------------
+
+def momentum_score() -> dict:
+    """4-week productivity trend signal.
+
+    Pulls the last 28 days of DailySummary data, splits into recent 14 days
+    vs prior 14 days, and computes a momentum score indicating whether
+    productivity is improving, stable, or declining.  Also identifies the
+    best/worst day of the week and peak hour of day.
+    """
+    today = _today()
+    start_date = today - timedelta(days=27)
+    midpoint = today - timedelta(days=13)
+
+    session = get_session()
+    try:
+        summaries = (
+            session.query(DailySummary)
+            .filter(
+                DailySummary.date >= start_date,
+                DailySummary.date <= today,
+            )
+            .all()
+        )
+
+        # Group by date for daily totals
+        daily_totals: dict[date, float] = defaultdict(float)
+        for s in summaries:
+            daily_totals[s.date] += s.total_seconds
+
+        # Split into two halves
+        prior_days: list[float] = []
+        recent_days: list[float] = []
+        for d, secs in daily_totals.items():
+            if d < midpoint:
+                prior_days.append(secs)
+            else:
+                recent_days.append(secs)
+
+        prior_avg = sum(prior_days) / len(prior_days) if prior_days else 0.0
+        recent_avg = sum(recent_days) / len(recent_days) if recent_days else 0.0
+
+        # Momentum score: clamped to -100..+100
+        if prior_avg > 0:
+            raw_momentum = ((recent_avg - prior_avg) / prior_avg) * 100
+        elif recent_avg > 0:
+            raw_momentum = 100.0
+        else:
+            raw_momentum = 0.0
+        momentum = round(max(-100.0, min(100.0, raw_momentum)), 1)
+
+        # Trend label
+        if momentum > 10:
+            trend = "improving"
+        elif momentum < -10:
+            trend = "declining"
+        else:
+            trend = "stable"
+
+        # Best/worst day of week
+        dow_totals: dict[int, list[float]] = defaultdict(list)
+        for d, secs in daily_totals.items():
+            dow_totals[d.weekday()].append(secs)
+
+        dow_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        dow_avg: dict[int, float] = {}
+        for dow, values in dow_totals.items():
+            dow_avg[dow] = sum(values) / len(values) if values else 0.0
+
+        if dow_avg:
+            best_dow = max(dow_avg, key=dow_avg.get)  # type: ignore[arg-type]
+            worst_dow = min(dow_avg, key=dow_avg.get)  # type: ignore[arg-type]
+            best_day_of_week = dow_names[best_dow]
+            worst_day_of_week = dow_names[worst_dow]
+        else:
+            best_day_of_week = "N/A"
+            worst_day_of_week = "N/A"
+
+        # Peak hour from ActivitySample (last 28 days)
+        ds = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
+        de = datetime(today.year, today.month, today.day, tzinfo=timezone.utc) + timedelta(days=1)
+
+        samples = (
+            session.query(ActivitySample.sampled_at)
+            .filter(
+                ActivitySample.sampled_at >= ds,
+                ActivitySample.sampled_at < de,
+                ActivitySample.is_idle == False,  # noqa: E712
+            )
+            .all()
+        )
+
+        hour_counts: dict[int, int] = defaultdict(int)
+        for row in samples:
+            hour_counts[row.sampled_at.hour] += 1
+
+        peak_hour_of_day = max(hour_counts, key=hour_counts.get) if hour_counts else 0  # type: ignore[arg-type]
+
+        # Streak context string
+        streaks_data = compute_streaks()
+        active_streak = streaks_data.get("streaks", {}).get("active", {})
+        current_streak = active_streak.get("current", 0)
+        if current_streak > 7:
+            streak_context = f"Strong streak: {current_streak} consecutive active days."
+        elif current_streak > 3:
+            streak_context = f"Building momentum: {current_streak} active days in a row."
+        elif current_streak > 0:
+            streak_context = f"Getting started: {current_streak} active day(s)."
+        else:
+            streak_context = "No current active streak."
+
+        return {
+            "momentum_score": momentum,
+            "trend": trend,
+            "recent_14_day_avg_seconds": round(recent_avg, 1),
+            "prior_14_day_avg_seconds": round(prior_avg, 1),
+            "best_day_of_week": best_day_of_week,
+            "worst_day_of_week": worst_day_of_week,
+            "peak_hour_of_day": peak_hour_of_day,
+            "streak_context": streak_context,
+        }
+    except Exception:
+        log.exception("Error computing momentum score")
+        return {
+            "momentum_score": 0.0,
+            "trend": "stable",
+            "recent_14_day_avg_seconds": 0.0,
+            "prior_14_day_avg_seconds": 0.0,
+            "best_day_of_week": "N/A",
+            "worst_day_of_week": "N/A",
+            "peak_hour_of_day": 0,
+            "streak_context": "",
+        }
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# 22. context_switch_cost
+# ---------------------------------------------------------------------------
+
+def context_switch_cost(target_date: date | None = None) -> dict:
+    """Estimated time cost of context switching using 2.5 min recovery model.
+
+    Each context switch (transition between different apps) incurs an estimated
+    2.5 minutes of cognitive recovery time.  The function classifies the day's
+    fragmentation level and identifies the most disruptive app — the one that
+    most often appears right after a different app.
+    """
+    if target_date is None:
+        target_date = _today()
+
+    day_start, day_end = _day_bounds(target_date)
+
+    session = get_session()
+    try:
+        # AppSession for switch counting
+        app_sessions = (
+            session.query(AppSession)
+            .filter(
+                AppSession.started_at >= day_start,
+                AppSession.started_at < day_end,
+            )
+            .order_by(AppSession.started_at)
+            .all()
+        )
+
+        # Count switches (transitions between different apps)
+        switch_count = 0
+        disruption_counts: dict[str, int] = defaultdict(int)
+        for i in range(1, len(app_sessions)):
+            prev = app_sessions[i - 1]
+            curr = app_sessions[i]
+            if curr.process_name != prev.process_name:
+                switch_count += 1
+                disruption_counts[curr.process_name] += 1
+
+        # Active hours from ActivitySample
+        active_count = (
+            session.query(func.count(ActivitySample.id))
+            .filter(
+                ActivitySample.sampled_at >= day_start,
+                ActivitySample.sampled_at < day_end,
+                ActivitySample.is_idle == False,  # noqa: E712
+            )
+            .scalar()
+        ) or 0
+        active_seconds = active_count * cfg.sample_interval
+        active_hours = active_seconds / 3600.0 if active_seconds > 0 else 0.0
+
+        # Switches per hour
+        switches_per_hour = round(switch_count / active_hours, 1) if active_hours > 0 else 0.0
+
+        # Estimated cost in minutes (2.5 min per switch)
+        estimated_cost_minutes = round(switch_count * 2.5, 1)
+
+        # Fragmentation label
+        if switch_count < 10:
+            fragmentation_label = "focused"
+        elif switch_count < 25:
+            fragmentation_label = "moderate"
+        else:
+            fragmentation_label = "fragmented"
+
+        # Most disruptive app
+        if disruption_counts:
+            most_disruptive_app = max(disruption_counts, key=disruption_counts.get)  # type: ignore[arg-type]
+        else:
+            most_disruptive_app = ""
+
+        # Focus to switch ratio: focus_time / (focus_time + estimated_cost)
+        # Use focus session time as "focus_time"
+        focus_sessions_list = (
+            session.query(AppSession)
+            .filter(
+                AppSession.started_at >= day_start,
+                AppSession.started_at < day_end,
+                AppSession.duration_seconds >= 1800,
+            )
+            .all()
+        )
+        focus_time_minutes = sum(s.duration_seconds for s in focus_sessions_list) / 60.0
+        total_time = focus_time_minutes + estimated_cost_minutes
+        focus_to_switch_ratio = round(focus_time_minutes / total_time, 3) if total_time > 0 else 0.0
+
+        return {
+            "date": target_date.isoformat(),
+            "switch_count": switch_count,
+            "switches_per_hour": switches_per_hour,
+            "estimated_cost_minutes": estimated_cost_minutes,
+            "fragmentation_label": fragmentation_label,
+            "most_disruptive_app": most_disruptive_app,
+            "focus_to_switch_ratio": focus_to_switch_ratio,
+        }
+    except Exception:
+        log.exception("Error computing context switch cost for %s", target_date)
+        return {
+            "date": (target_date or _today()).isoformat(),
+            "switch_count": 0,
+            "switches_per_hour": 0.0,
+            "estimated_cost_minutes": 0.0,
+            "fragmentation_label": "focused",
+            "most_disruptive_app": "",
+            "focus_to_switch_ratio": 0.0,
+        }
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# 23. monthly_rollup
+# ---------------------------------------------------------------------------
+
+def monthly_rollup(year: int, month: int) -> dict:
+    """Full month summary aggregated from DailySummary and intelligence functions.
+
+    Counts working days (weekdays) and days with data, aggregates total and
+    average active seconds, productive percentage, top apps, best/worst days,
+    and provides a week-by-week breakdown (up to 5 weeks).
+    """
+    import calendar
+
+    session = get_session()
+    try:
+        # Determine the date range for the month
+        _, last_day = calendar.monthrange(year, month)
+        month_start = date(year, month, 1)
+        month_end = date(year, month, last_day)
+
+        # Count working days (weekdays: Mon-Fri)
+        working_days = 0
+        d = month_start
+        while d <= month_end:
+            if d.weekday() < 5:
+                working_days += 1
+            d += timedelta(days=1)
+
+        # Query DailySummary for the month
+        summaries = (
+            session.query(DailySummary)
+            .filter(
+                DailySummary.date >= month_start,
+                DailySummary.date <= month_end,
+            )
+            .all()
+        )
+
+        # Group by date for daily totals
+        daily_totals: dict[date, float] = defaultdict(float)
+        app_totals: dict[str, float] = defaultdict(float)
+        for s in summaries:
+            daily_totals[s.date] += s.total_seconds
+            app_totals[s.process_name] += s.total_seconds
+
+        days_with_data = len(daily_totals)
+
+        total_active_seconds = sum(daily_totals.values())
+        avg_daily_active_seconds = (
+            round(total_active_seconds / days_with_data, 1)
+            if days_with_data > 0 else 0.0
+        )
+
+        # Top apps
+        sorted_apps = sorted(app_totals.items(), key=lambda x: x[1], reverse=True)
+        top_apps = [
+            {
+                "process_name": app,
+                "seconds": secs,
+                "fmt": _fmt_duration(secs),
+            }
+            for app, secs in sorted_apps[:10]
+        ]
+
+        # Productivity percentage for the month
+        process_names = list({s.process_name for s in summaries})
+        categories = _get_app_categories(session, process_names) if process_names else {}
+        productive_seconds = 0.0
+        for s in summaries:
+            cat_info = categories.get(
+                s.process_name,
+                {"category": "uncategorized", "is_productive": False},
+            )
+            if cat_info["is_productive"]:
+                productive_seconds += s.total_seconds
+        productive_pct = (
+            round((productive_seconds / total_active_seconds) * 100, 1)
+            if total_active_seconds > 0 else 0.0
+        )
+
+        # Total focus sessions in the month
+        ds = datetime(month_start.year, month_start.month, month_start.day, tzinfo=timezone.utc)
+        de = datetime(month_end.year, month_end.month, month_end.day, tzinfo=timezone.utc) + timedelta(days=1)
+        total_focus_sessions = (
+            session.query(func.count(AppSession.id))
+            .filter(
+                AppSession.started_at >= ds,
+                AppSession.started_at < de,
+                AppSession.duration_seconds >= 1800,
+            )
+            .scalar()
+        ) or 0
+
+        # Best and worst day by active seconds
+        if daily_totals:
+            best_date = max(daily_totals, key=daily_totals.get)  # type: ignore[arg-type]
+            worst_date = min(daily_totals, key=daily_totals.get)  # type: ignore[arg-type]
+            best_day = {"date": best_date.isoformat(), "active_seconds": daily_totals[best_date]}
+            worst_day = {"date": worst_date.isoformat(), "active_seconds": daily_totals[worst_date]}
+        else:
+            best_day = {"date": "", "active_seconds": 0.0}
+            worst_day = {"date": "", "active_seconds": 0.0}
+
+        # Week-by-week breakdown (up to 5 weeks)
+        week_breakdown: list[dict] = []
+        # Use ISO week number approach: group by the week within the month
+        week_data: dict[int, dict] = defaultdict(lambda: {"seconds": 0.0, "prod_seconds": 0.0})
+
+        for s in summaries:
+            # Calculate which week of the month (0-indexed)
+            week_num = (s.date.day - 1) // 7
+            week_data[week_num]["seconds"] += s.total_seconds
+            cat_info = categories.get(
+                s.process_name,
+                {"category": "uncategorized", "is_productive": False},
+            )
+            if cat_info["is_productive"]:
+                week_data[week_num]["prod_seconds"] += s.total_seconds
+
+        for week_num in sorted(week_data.keys()):
+            wdata = week_data[week_num]
+            wprod_pct = (
+                round((wdata["prod_seconds"] / wdata["seconds"]) * 100, 1)
+                if wdata["seconds"] > 0 else 0.0
+            )
+            week_breakdown.append({
+                "week": week_num + 1,
+                "active_seconds": round(wdata["seconds"], 1),
+                "productive_pct": wprod_pct,
+            })
+
+        return {
+            "year": year,
+            "month": month,
+            "working_days": working_days,
+            "days_with_data": days_with_data,
+            "total_active_seconds": round(total_active_seconds, 1),
+            "total_active_fmt": _fmt_duration(total_active_seconds),
+            "avg_daily_active_seconds": avg_daily_active_seconds,
+            "avg_daily_active_fmt": _fmt_duration(avg_daily_active_seconds),
+            "productive_pct": productive_pct,
+            "top_apps": top_apps,
+            "total_focus_sessions": total_focus_sessions,
+            "best_day": best_day,
+            "worst_day": worst_day,
+            "week_breakdown": week_breakdown,
+        }
+    except Exception:
+        log.exception("Error computing monthly rollup for %d-%02d", year, month)
+        return {
+            "year": year,
+            "month": month,
+            "working_days": 0,
+            "days_with_data": 0,
+            "total_active_seconds": 0.0,
+            "total_active_fmt": "0m",
+            "avg_daily_active_seconds": 0.0,
+            "avg_daily_active_fmt": "0m",
+            "productive_pct": 0.0,
+            "top_apps": [],
+            "total_focus_sessions": 0,
+            "best_day": {"date": "", "active_seconds": 0.0},
+            "worst_day": {"date": "", "active_seconds": 0.0},
+            "week_breakdown": [],
+        }
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# 24. classify_sessions
+# ---------------------------------------------------------------------------
+
+def classify_sessions(target_date: date | None = None) -> dict:
+    """Classify AppSession rows into focus/meeting/break/shallow types.
+
+    Classification rules:
+      - meeting_apps (zoom, teams, webex) -> "meeting"
+      - duration >= 30 min with keyboard input -> "focus"
+      - predominantly idle gaps (no keys/clicks) -> "break"
+      - everything else -> "shallow"
+    """
+    if target_date is None:
+        target_date = _today()
+
+    day_start, day_end = _day_bounds(target_date)
+
+    meeting_apps = {"zoom.exe", "ms-teams.exe", "teams.exe", "webex.exe"}
+
+    session = get_session()
+    try:
+        app_sessions = (
+            session.query(AppSession)
+            .filter(
+                AppSession.started_at >= day_start,
+                AppSession.started_at < day_end,
+            )
+            .order_by(AppSession.started_at)
+            .all()
+        )
+
+        classified: list[dict] = []
+        summary_minutes: dict[str, float] = {
+            "focus": 0.0,
+            "meeting": 0.0,
+            "break": 0.0,
+            "shallow": 0.0,
+        }
+
+        for s in app_sessions:
+            pname_lower = (s.process_name or "").lower()
+            duration_minutes = s.duration_seconds / 60.0
+
+            if pname_lower in meeting_apps:
+                session_type = "meeting"
+            elif s.duration_seconds >= 1800 and s.total_keys > 0:
+                session_type = "focus"
+            elif s.total_keys == 0 and s.total_clicks == 0:
+                session_type = "break"
+            else:
+                session_type = "shallow"
+
+            summary_minutes[session_type] += duration_minutes
+
+            classified.append({
+                "process_name": s.process_name,
+                "started_at": s.started_at.isoformat(),
+                "duration_seconds": s.duration_seconds,
+                "session_type": session_type,
+            })
+
+        return {
+            "date": target_date.isoformat(),
+            "sessions": classified,
+            "summary": {
+                "focus_minutes": round(summary_minutes["focus"], 1),
+                "meeting_minutes": round(summary_minutes["meeting"], 1),
+                "break_minutes": round(summary_minutes["break"], 1),
+                "shallow_minutes": round(summary_minutes["shallow"], 1),
+            },
+            "total_sessions": len(classified),
+        }
+    except Exception:
+        log.exception("Error classifying sessions for %s", target_date)
+        return {
+            "date": (target_date or _today()).isoformat(),
+            "sessions": [],
+            "summary": {
+                "focus_minutes": 0.0,
+                "meeting_minutes": 0.0,
+                "break_minutes": 0.0,
+                "shallow_minutes": 0.0,
+            },
+            "total_sessions": 0,
+        }
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# 25. weekly_digest
+# ---------------------------------------------------------------------------
+
+def weekly_digest() -> dict:
+    """Narrative weekly digest with 5 ranked insights for email/AI coaching.
+
+    Assembles a comprehensive weekly summary by calling existing intelligence
+    functions for each of the last 7 days, then generating 5 insights covering
+    active time trends, focus sessions, context switching costs, streaks, and
+    best/worst days.  Includes a next-week suggestion based on the weakest area.
+    """
+    today = _today()
+    week_start = today - timedelta(days=6)
+
+    try:
+        # Gather trend comparison (current week vs prior week)
+        trend = trend_comparison(today, 7)
+        streaks_data = compute_streaks()
+
+        # Per-day data
+        daily_data: list[dict] = []
+        total_focus_sessions_all = 0
+        total_switch_cost_minutes = 0.0
+        longest_focus_session: dict = {"app": "", "duration_seconds": 0.0, "day": ""}
+        daily_active_seconds: dict[str, float] = {}
+
+        for i in range(7):
+            d = week_start + timedelta(days=i)
+            focus = detect_focus_sessions(d)
+            total_focus_sessions_all += len(focus)
+
+            # Track longest focus session across the week
+            for fs in focus:
+                if fs["duration_seconds"] > longest_focus_session["duration_seconds"]:
+                    longest_focus_session = {
+                        "app": fs["primary_app"],
+                        "duration_seconds": fs["duration_seconds"],
+                        "day": d.isoformat(),
+                    }
+
+            # Context switch cost for the day
+            cs_cost = context_switch_cost(d)
+            total_switch_cost_minutes += cs_cost.get("estimated_cost_minutes", 0.0)
+
+            # Get active seconds for the day from DailySummary
+            session = get_session()
+            try:
+                day_summaries = (
+                    session.query(DailySummary)
+                    .filter(DailySummary.date == d)
+                    .all()
+                )
+                day_active = sum(s.total_seconds for s in day_summaries)
+            finally:
+                session.close()
+
+            daily_active_seconds[d.isoformat()] = day_active
+            daily_data.append({
+                "date": d.isoformat(),
+                "active_seconds": day_active,
+                "focus_sessions": len(focus),
+                "switch_cost_minutes": cs_cost.get("estimated_cost_minutes", 0.0),
+            })
+
+        # Total active time this week
+        total_active_seconds = sum(daily_active_seconds.values())
+
+        # Change vs prior week
+        current_total = trend.get("current_total_seconds", 0.0)
+        previous_total = trend.get("previous_total_seconds", 0.0)
+        change_pct = trend.get("change_pct", 0.0)
+
+        # Best and worst days
+        if daily_active_seconds:
+            best_day_date = max(daily_active_seconds, key=daily_active_seconds.get)  # type: ignore[arg-type]
+            worst_day_date = min(daily_active_seconds, key=daily_active_seconds.get)  # type: ignore[arg-type]
+            best_day = {
+                "date": best_day_date,
+                "reason": f"Most active: {_fmt_duration(daily_active_seconds[best_day_date])}",
+            }
+            worst_day = {
+                "date": worst_day_date,
+                "reason": f"Least active: {_fmt_duration(daily_active_seconds[worst_day_date])}",
+            }
+        else:
+            best_day = {"date": "", "reason": "No data"}
+            worst_day = {"date": "", "reason": "No data"}
+
+        # Build 5 insights
+        insights: list[dict] = []
+
+        # 1. Active time delta vs prior week
+        if change_pct >= 0:
+            direction = "more"
+        else:
+            direction = "less"
+        insights.append({
+            "title": "Weekly Active Time",
+            "body": (
+                f"You logged {_fmt_duration(total_active_seconds)} of active time this week, "
+                f"{abs(change_pct)}% {direction} than the prior week "
+                f"({_fmt_duration(previous_total)})."
+            ),
+        })
+
+        # 2. Longest focus session
+        if longest_focus_session["duration_seconds"] > 0:
+            insights.append({
+                "title": "Longest Focus Session",
+                "body": (
+                    f"Your longest focus block was "
+                    f"{_fmt_duration(longest_focus_session['duration_seconds'])} "
+                    f"in {longest_focus_session['app']} on "
+                    f"{longest_focus_session['day']}."
+                ),
+            })
+        else:
+            insights.append({
+                "title": "Longest Focus Session",
+                "body": "No focus sessions (>=30 min) were recorded this week.",
+            })
+
+        # 3. Context switching cost
+        insights.append({
+            "title": "Context Switching Cost",
+            "body": (
+                f"Estimated {round(total_switch_cost_minutes, 0):.0f} minutes lost to "
+                f"context switching recovery across the week. "
+                f"That's about {_fmt_duration(total_switch_cost_minutes * 60)} of "
+                f"cognitive overhead."
+            ),
+        })
+
+        # 4. Streak status
+        active_streak = streaks_data.get("streaks", {}).get("active", {})
+        productive_streak = streaks_data.get("streaks", {}).get("productive", {})
+        insights.append({
+            "title": "Streak Status",
+            "body": (
+                f"Active streak: {active_streak.get('current', 0)} day(s). "
+                f"Productive streak: {productive_streak.get('current', 0)} day(s). "
+                f"Best active streak ever: {active_streak.get('best', 0)} day(s)."
+            ),
+        })
+
+        # 5. Best/worst day
+        insights.append({
+            "title": "Best & Worst Days",
+            "body": (
+                f"Best day: {best_day['date']} — {best_day['reason']}. "
+                f"Worst day: {worst_day['date']} — {worst_day['reason']}."
+            ),
+        })
+
+        # Top insight (the most notable)
+        top_insight = insights[0]["body"] if insights else ""
+
+        # Week summary text
+        week_summary_text = (
+            f"This week you were active for {_fmt_duration(total_active_seconds)}, "
+            f"{abs(change_pct)}% {direction} than last week. "
+            f"You had {total_focus_sessions_all} focus session(s) and lost an estimated "
+            f"{round(total_switch_cost_minutes):.0f} minutes to context switching."
+        )
+
+        # Next week suggestion based on weakest area
+        if total_focus_sessions_all == 0:
+            next_week_suggestion = (
+                "Try blocking out at least one 30-minute uninterrupted session each day. "
+                "Deep focus is where the real progress happens."
+            )
+        elif total_switch_cost_minutes > 120:
+            next_week_suggestion = (
+                "Your context switching cost was high this week. Consider batching similar "
+                "tasks together and closing distracting apps during focus blocks."
+            )
+        elif change_pct < -20:
+            next_week_suggestion = (
+                "Your active time dropped significantly. Set clear daily goals and "
+                "consider time-boxing your most important tasks each morning."
+            )
+        else:
+            next_week_suggestion = (
+                "Keep up the momentum. Try extending your longest focus sessions "
+                "by 15 minutes and maintaining your active streak."
+            )
+
+        return {
+            "week_ending": today.isoformat(),
+            "week_summary_text": week_summary_text,
+            "top_insight": top_insight,
+            "insights": insights,
+            "best_day": best_day,
+            "worst_day": worst_day,
+            "next_week_suggestion": next_week_suggestion,
+        }
+    except Exception:
+        log.exception("Error generating weekly digest")
+        return {
+            "week_ending": today.isoformat(),
+            "week_summary_text": "",
+            "top_insight": "",
+            "insights": [],
+            "best_day": {"date": "", "reason": ""},
+            "worst_day": {"date": "", "reason": ""},
+            "next_week_suggestion": "",
+        }
